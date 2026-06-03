@@ -17,11 +17,11 @@ logging.basicConfig(
     ],
     level=logging.INFO,
 )
-logging.getLogger("httpx").setLevel(logging.ERROR)
-logging.getLogger("ntgcalls").setLevel(logging.CRITICAL)
-logging.getLogger("pymongo").setLevel(logging.ERROR)
-logging.getLogger("pyrogram").setLevel(logging.ERROR)
-logging.getLogger("pytgcalls").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.INFO)
+logging.getLogger("ntgcalls").setLevel(logging.INFO)
+logging.getLogger("pymongo").setLevel(logging.INFO)
+logging.getLogger("pyrogram").setLevel(logging.INFO)
+logging.getLogger("pytgcalls").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 
