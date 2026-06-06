@@ -209,11 +209,11 @@ class BotManager:
     async def help(self, client: Client, message: Message) -> None:
         await message.reply_text(
             "<b>Manager Commands</b>\n"
-            "/newbot <name> <bot_token> <session_string> [mongo_url] - Create and start a new deployment.\n"
+            "/newbot &lt;name&gt; &lt;bot_token&gt; &lt;session_string&gt; [mongo_url] - Create and start a new deployment.\n"
             "/list - Show all deployments.\n"
-            "/status <name> - Show deployment status.\n"
-            "/deploy <name> - Start a stopped deployment.\n"
-            "/stop <name> - Stop a running deployment.\n",
+            "/status &lt;name&gt; - Show deployment status.\n"
+            "/deploy &lt;name&gt; - Start a stopped deployment.\n"
+            "/stop &lt;name&gt; - Stop a running deployment.\n",
             quote=True,
         )
 
@@ -232,7 +232,7 @@ class BotManager:
     async def status(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            return await message.reply_text("Usage: /status <name>", quote=True)
+            return await message.reply_text("Usage: /status &lt;name&gt;", quote=True)
 
         name = normalize_name(args[1])
         deployment = self.store.get(name)
@@ -255,7 +255,7 @@ class BotManager:
     async def deploy(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            return await message.reply_text("Usage: /deploy <name>", quote=True)
+            return await message.reply_text("Usage: /deploy &lt;name&gt;", quote=True)
 
         name = normalize_name(args[1])
         deployment = self.store.get(name)
@@ -276,7 +276,7 @@ class BotManager:
     async def stop(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            return await message.reply_text("Usage: /stop <name>", quote=True)
+            return await message.reply_text("Usage: /stop &lt;name&gt;", quote=True)
 
         name = normalize_name(args[1])
         deployment = self.store.get(name)
@@ -296,7 +296,7 @@ class BotManager:
         args = message.text.split(maxsplit=4)
         if len(args) < 4:
             return await message.reply_text(
-                "Usage: /newbot <name> <bot_token> <session_string> [mongo_url]",
+                "Usage: /newbot &lt;name&gt; &lt;bot_token&gt; &lt;session_string&gt; [mongo_url]",
                 quote=True,
             )
 
