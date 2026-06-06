@@ -40,46 +40,45 @@ Manage keys from our official dashboard (no Telegram DMs needed):
 
 [![API Dashboard](https://img.shields.io/badge/Visit-Dashboard-black?style=for-the-badge&logo=vercel)](https://console.nexgenbots.xyz)  
 [![API Community](https://img.shields.io/badge/Join-API%20Community-green?style=for-the-badge&logo=telegram)](https://t.me/+oH1cVV8YSsdhMWU5)  
-[![Contact Rahul](https://img.shields.io/badge/DM-@RahulTC-blueviolet?style=for-the-badge&logo=telegram)](https://t.me/ItzRahul)  
+[![Contact Rahul](https://img.shields.io/badge/DM-@RahulTC-blueviolet?style=for-the-badge&logo=telegram)](https://t.me/ItzRahul)
 
 ---
 
 #### 🛠️ Steps to Get Started
 
-1. **Sign up** at [console.nexgenbots.xyz](https://console.nexgenbots.xyz) and create an account.  
-2. **Generate Key**: After logging in, click **“Generate Key”** on the dashboard to activate the **Free Plan**.  
-3. **Upgrade anytime** via the dashboard for higher limits.  
+1. **Sign up** at [console.nexgenbots.xyz](https://console.nexgenbots.xyz) and create an account.
+2. **Generate Key**: After logging in, click **“Generate Key”** on the dashboard to activate the **Free Plan**.
+3. **Upgrade anytime** via the dashboard for higher limits.
 
 ---
 
 ### 📦 Plans & Pricing (₹/month)
 
-| Plan          | Daily API Requests | Daily Video Requests | Price   |
-|---------------|--------------------|----------------------|---------|
-| **Free**      | 500                | 25                   | ₹0      |
-| **Basic**     | 3,000              | 150                  | ₹150    |
-| **Starter**   | 5,000              | 250                  | ₹250    |
-| **Standard**  | 15,000             | 750                  | ₹450    |
-| **Pro**       | 25,000             | 1,250                | ₹900    |
-| **Business**  | 50,000             | 2,500                | ₹1700   |
-| **Enterprise**| 100,000            | 5,000                | ₹3200   |
-| **Ultra**     | 150,000            | 7,500                | ₹4500   |
+| Plan           | Daily API Requests | Daily Video Requests | Price |
+| -------------- | ------------------ | -------------------- | ----- |
+| **Free**       | 500                | 25                   | ₹0    |
+| **Basic**      | 3,000              | 150                  | ₹150  |
+| **Starter**    | 5,000              | 250                  | ₹250  |
+| **Standard**   | 15,000             | 750                  | ₹450  |
+| **Pro**        | 25,000             | 1,250                | ₹900  |
+| **Business**   | 50,000             | 2,500                | ₹1700 |
+| **Enterprise** | 100,000            | 5,000                | ₹3200 |
+| **Ultra**      | 150,000            | 7,500                | ₹4500 |
 
 ---
 
 ### 📌 Important Notes About API Usage
 
-- 🔄 **Daily Reset**: All limits reset at midnight (IST).  
-- 🎧🎬 **Audio + Video**: Fully supported via API (vPlay).  
-- 🍪 **Fallback**: Add local **custom cookies** if you prefer not to use the API (works for both audio & video).  
-- 💬 **Support**: Join the [API Community Group](https://t.me/+oH1cVV8YSsdhMWU5).  
+- 🔄 **Daily Reset**: All limits reset at midnight (IST).
+- 🎧🎬 **Audio + Video**: Fully supported via API (vPlay).
+- 🍪 **Fallback**: Add local **custom cookies** if you prefer not to use the API (works for both audio & video).
+- 💬 **Support**: Join the [API Community Group](https://t.me/+oH1cVV8YSsdhMWU5).
 
 ---
 
 ### ⚙️ Integration
 
 Add your API key to `.env`:
-
 
 API_KEY=your-api-key-here
 
@@ -96,7 +95,8 @@ API_KEY=your-api-key-here
 
 ---
 
-## 🚀 Deploy on Heroku 
+## 🚀 Deploy on Heroku
+
 [![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://dashboard.heroku.com/new?template=https://github.com/CyberPixelPro/AviaxMusic)
 
 ---
@@ -105,54 +105,59 @@ API_KEY=your-api-key-here
 
 <h3>✔️ Prerequisites</h3>
 
-- <a href="https://www.python.org">Python 3.10+</a> installed  
-- <a href="https://deno.com/">deno</a> & <a href="https://ffmpeg.org//">ffmpeg</a> installed on your system  
+- <a href="https://www.python.org">Python 3.10+</a> installed
+- <a href="https://deno.com/">deno</a> & <a href="https://ffmpeg.org//">ffmpeg</a> installed on your system
 - Required variables mentioned in <a href="https://github.com/CyberPixelPro/AviaxMusic/blob/master/sample.env">sample.env</a>
 
 1. **Upgrade & Update:**
+
    ```bash
    sudo apt-get update && sudo apt-get upgrade -y
    ```
 
 2. **Install Required Packages:**
+
    ```bash
    sudo apt-get install python3-pip ffmpeg -y
    ```
 
 3. **Install Deno:**
+
    ```bash
    apt-get install unzip && curl -fsSL https://deno.land/install.sh | sh
    ```
 
-3. **Setting up PIP**
+4. **Setting up PIP**
    ```bash
    sudo pip3 install -U pip
    ```
-4. **Clone the Repository**
+5. **Clone the Repository**
    ```bash
    git clone https://github.com/CyberPixelPro/AviaxMusic && cd AviaxMusic
    ```
-5. **Install Requirements**
+6. **Install Requirements**
    ```bash
    pip3 install -U -r requirements.txt
    ```
-6. **Create .env  with sample.env**
+7. **Create .env with sample.env**
    ```bash
    cp sample.env .env
    ```
+
    - Edit .env with your vars
-7. **Editing Vars:**
+8. **Editing Vars:**
    ```bash
    vi .env
    ```
+
    - Edit .env with your values.
    - Press `I` button on keyboard to start editing.
-   - Press `Ctrl + C`  once you are done with editing vars and type `:wq` to save .env or `:qa` to exit editing.
-8. **Installing tmux**
-    ```bash
-    sudo apt install tmux -y && tmux
-    ```
-9. **Run the Bot**
+   - Press `Ctrl + C` once you are done with editing vars and type `:wq` to save .env or `:qa` to exit editing.
+9. **Installing tmux**
+   ```bash
+   sudo apt install tmux -y && tmux
+   ```
+10. **Run the Bot**
     ```bash
     bash start
     ```
@@ -163,14 +168,14 @@ API_KEY=your-api-key-here
 
 The Aviax Music Bot offers a range of commands to enhance your music listening experience on Telegram:
 
-| Command                 | Description                                 |
-|-------------------------|---------------------------------------------|
-| `/play <song name>`     | Play the requested song.                    |
-| `/pause`                | Pause the currently playing song.           |
-| `/resume`               | Resume the paused song.                     |
-| `/skip`                 | Move to the next song in the queue.         |
-| `/stop`                 | Stop the bot and clear the queue.           |
-| `/queue`                | Display the list of songs in the queue.     |
+| Command             | Description                             |
+| ------------------- | --------------------------------------- |
+| `/play <song name>` | Play the requested song.                |
+| `/pause`            | Pause the currently playing song.       |
+| `/resume`           | Resume the paused song.                 |
+| `/skip`             | Move to the next song in the queue.     |
+| `/stop`             | Stop the bot and clear the queue.       |
+| `/queue`            | Display the list of songs in the queue. |
 
 For a full list of commands, use `/help` in [telegram](https://t.me/AviaxBeatzBot).
 
@@ -214,10 +219,41 @@ This project is licensed under the MIT License. For more details, see the [LICEN
 ### 🙏 Acknowledgements
 
 Thanks to all the contributors, supporters, and users of the Aviax Music Bot. Your feedback and support keep us going!
+
 - AnonX Music – Base inspiration
 - All contributors & community members
-  
+
+---
+
+## 🤖 Deployment Manager Bot
+
+A lightweight manager bot has been added to automate new music bot deployments from this template.
+
+### Setup
+
+1. Copy `manager.env.sample` to `manager.env`
+2. Fill in `MANAGER_API_ID`, `MANAGER_API_HASH`, `MANAGER_BOT_TOKEN`, and `MANAGER_OWNER_ID`
+3. Optionally set `MANAGER_DEFAULT_MONGO_URL` and `MANAGER_DEFAULT_LOGGER_ID`
+4. Run the manager:
+
+```bash
+python manager.py
+```
+
+### Manager Commands
+
+- `/newbot <name> <bot_token> <session_string> [mongo_url]` — create and start a new deployment
+- `/list` — list existing deployments
+- `/status <name>` — check a deployment's status
+- `/deploy <name>` — start a stopped deployment
+- `/stop <name>` — stop a running deployment
+
+### Notes
+
+- The manager uses the current repository as the deployment template.
+- Deployments are stored under `deployments/<name>/` with a generated `.env` file.
+- A valid `SESSION` string is required by this template for the assistant userbot.
+
 ---
 
 ⭐ If you like this project, don’t forget to star the repo!
-
