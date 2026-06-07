@@ -647,32 +647,6 @@ class BotManager:
             # start monitor thread after app started
             self.monitor_thread.start()
 
-            # Auto-start stored deployments (if any). We do not restart deployments
-            # that appear to be already running (pid check). Notify owner on failures.
-            for deployment in list(self.store.list().values()):
-                proc = self._find_running_deployment_process(deployment)
-                if proc:
-                    deployment.pid = proc.pid
-                    self.store.update(deployment)
-                    logger.info("Deployment %s already running (pid=%s), skipping auto-start.", deployment.name, deployment.pid)
-                    continue
-
-                if deployment.is_running:
-                    logger.info("Deployment %s already running (pid=%s), skipping auto-start.", deployment.name, deployment.pid)
-                    continue
-                logger.info("Auto-starting deployment %s", deployment.name)
-                started, error = self.start_process(deployment)
-                if started:
-                    deployment.started_at = datetime.now(timezone.utc).isoformat()
-                    self.store.update(deployment)
-                    logger.info("Auto-started deployment %s pid=%s", deployment.name, deployment.pid)
-                else:
-                    logger.error("Auto-start failed for %s: %s", deployment.name, error)
-                    try:
-                        self._notify_owner(f"⚠️ Failed to auto-start deployment <b>{deployment.name}</b>: {error}")
-                    except Exception:
-                        logger.exception("Failed to notify owner about auto-start failure for %s", deployment.name)
-
             # Block until stop signal; idle keeps the client running.
             idle()
         finally:
