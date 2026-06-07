@@ -50,8 +50,6 @@ class Inline:
         self,
         _lang: dict,
         back: bool = False,
-        chat_id: int | None = None,
-        user_id: int | None = None,
     ) -> types.InlineKeyboardMarkup:
         if back:
             rows = [
@@ -61,7 +59,17 @@ class Inline:
                 ]
             ]
         else:
-            cbs = ["admins", "auth", "blist", "lang", "ping", "play", "queue", "stats", "sudo"]
+            cbs = [
+                "admins",
+                "auth",
+                "blist",
+                "lang",
+                "ping",
+                "play",
+                "queue",
+                "stats",
+                "sudo",
+            ]
             icons = {
                 "admins": "🛡️",
                 "auth": "🔐",
@@ -73,30 +81,9 @@ class Inline:
                 "stats": "📊",
                 "sudo": "👑",
             }
-            allowed = {
-                "lang",
-                "ping",
-                "play",
-                "queue",
-            }
-            if user_id is not None and user_id == app.owner:
-                allowed.add("sudo")
-                if chat_id is not None:
-                    allowed.update({"admins", "auth", "blist", "stats"})
-            elif user_id is not None and user_id in app.sudoers:
-                allowed.add("sudo")
-                if chat_id is not None:
-                    allowed.update({"admins", "auth", "blist", "stats"})
-            elif chat_id is not None:
-                allowed.add("stats")
-                admins = await db.get_admins(chat_id)
-                if user_id in admins:
-                    allowed.update({"admins", "auth", "blist"})
-
             buttons = [
                 self.ikb(text=f"{icons[cb]} {_lang[f'help_{i}']}", callback_data=f"help {cb}")
                 for i, cb in enumerate(cbs)
-                if cb in allowed
             ]
             rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
 
@@ -174,7 +161,7 @@ class Inline:
         rows = [
                 [
                     self.ikb(
-                    text=f"➕ {lang['add_me']}",
+                        text=f"➕ {lang['add_me']}",
                     url=f"https://t.me/{app.username}?startgroup=true",
                 )
             ],

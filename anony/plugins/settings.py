@@ -3,15 +3,24 @@
 # This file is part of AnonXMusic
 
 
-from pyrogram import filters, types
+from pyrogram import enums, filters, types
 
 from anony import app, config, db, lang
 
 
-@app.on_message(filters.command(["settings", "set"]) & app.sudoers & ~app.bl_users & filters.private)
+@app.on_message(filters.command(["settings", "set"]) & ~app.bl_users)
 @lang.language()
 async def _settings(_, m: types.Message):
     """Show runtime setting help or update a setting when key/value are provided."""
+    if m.chat.type != enums.ChatType.PRIVATE:
+        return await m.reply_text(
+            "This command works in private chats only, because it changes live bot settings."
+        )
+    if m.from_user.id not in app.sudoers:
+        return await m.reply_text(
+            "You need sudo access to use this command, because it changes live bot settings."
+        )
+
     runtime = await db.get_all_config()
 
     valid_keys = [
@@ -88,10 +97,19 @@ async def _settings(_, m: types.Message):
     )
 
 
-@app.on_message(filters.command(["get"]) & app.sudoers & filters.private)
+@app.on_message(filters.command(["get"]) & ~app.bl_users)
 @lang.language()
 async def _get_setting(_, m: types.Message):
     """Get a specific setting value. Usage: /get KEY"""
+    if m.chat.type != enums.ChatType.PRIVATE:
+        return await m.reply_text(
+            "This command works in private chats only, because it reads live bot settings."
+        )
+    if m.from_user.id not in app.sudoers:
+        return await m.reply_text(
+            "You need sudo access to use this command, because it reads live bot settings."
+        )
+
     if len(m.command) < 2:
         return await m.reply_text("Usage: /get &lt;key&gt;")
     
@@ -112,10 +130,19 @@ async def _get_setting(_, m: types.Message):
     await m.reply_text(f"<code>{key}</code> = <code>{value}</code>\n(override)")
 
 
-@app.on_message(filters.command(["reset"]) & app.sudoers & filters.private)
+@app.on_message(filters.command(["reset"]) & ~app.bl_users)
 @lang.language()
 async def _reset_setting(_, m: types.Message):
     """Reset a setting to its default (environment) value. Usage: /reset KEY"""
+    if m.chat.type != enums.ChatType.PRIVATE:
+        return await m.reply_text(
+            "This command works in private chats only, because it resets live bot settings."
+        )
+    if m.from_user.id not in app.sudoers:
+        return await m.reply_text(
+            "You need sudo access to use this command, because it resets live bot settings."
+        )
+
     if len(m.command) < 2:
         return await m.reply_text("Usage: /reset &lt;key&gt;")
     
