@@ -8,87 +8,84 @@ from pyrogram import filters, types
 from anony import app, config, db, lang
 
 
-@app.on_message(filters.command(["settings"]) & app.sudoers & ~app.bl_users & filters.private)
+@app.on_message(filters.command(["settings", "set"]) & app.sudoers & ~app.bl_users & filters.private)
 @lang.language()
-async def _settings_list(_, m: types.Message):
-    """List all current settings including runtime overrides."""
+async def _settings(_, m: types.Message):
+    """Show runtime setting help or update a setting when key/value are provided."""
     runtime = await db.get_all_config()
-    text = "<b>📋 Bot Settings</b>\n\n"
-    
+
+    valid_keys = [
+        "AUTO_LEAVE",
+        "AUTO_END",
+        "THUMB_GEN",
+        "VIDEO_PLAY",
+        "LANG_CODE",
+        "DEFAULT_THUMB",
+        "PING_IMG",
+        "START_IMG",
+    ]
+    bool_keys = {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY"}
+
     def short(value: str, limit: int = 50) -> str:
         return value if not value or len(value) <= limit else value[:limit - 3] + "..."
 
-    settings_info = [
-        ("API_URL", config.API_URL, runtime.get("API_URL")),
-        ("VIDEO_API_URL", config.VIDEO_API_URL, runtime.get("VIDEO_API_URL")),
-        ("API_KEY", "***" if config.API_KEY else "(not set)", "***" if runtime.get("API_KEY") else None),
-        ("AUTO_LEAVE", str(config.AUTO_LEAVE), runtime.get("AUTO_LEAVE")),
-        ("AUTO_END", str(config.AUTO_END), runtime.get("AUTO_END")),
-        ("THUMB_GEN", str(config.THUMB_GEN), runtime.get("THUMB_GEN")),
-        ("VIDEO_PLAY", str(config.VIDEO_PLAY), runtime.get("VIDEO_PLAY")),
-        ("LANG_CODE", config.LANG_CODE, runtime.get("LANG_CODE")),
-        ("DEFAULT_THUMB", short(config.DEFAULT_THUMB), short(runtime.get("DEFAULT_THUMB", ""))),
-        ("PING_IMG", short(config.PING_IMG), short(runtime.get("PING_IMG", ""))),
-        ("START_IMG", short(config.START_IMG), short(runtime.get("START_IMG", ""))),
-        (
-            "COOKIES_URL",
-            " ".join(config.COOKIES_URL) or "(none)",
-            " ".join(runtime.get("COOKIES_URL")) if runtime.get("COOKIES_URL") else None,
-        ),
-        (
-            "DOWNLOADS_PATH",
-            str(config.DOWNLOADS_PATH) if config.DOWNLOADS_PATH else "(default)",
-            str(runtime.get("DOWNLOADS_PATH")) if runtime.get("DOWNLOADS_PATH") else None,
-        ),
-    ]
-    
-    for key, default, override in settings_info:
-        value = override if override is not None else default
-        marker = " 🔄" if override is not None else ""
-        text += f"• <code>{key}</code>: <code>{value}</code>{marker}\n"
-    
-    await m.reply_text(text)
-
-
-@app.on_message(filters.command(["set"]) & app.sudoers & filters.private)
-@lang.language()
-async def _set_setting(_, m: types.Message):
-    """Set a runtime configuration value. Usage: /set KEY VALUE"""
-    if len(m.command) < 3:
-        return await m.reply_text(
-            m.lang.get(
-                "setting_usage",
-                "Usage: /set <key> <value>\n"
-                "Valid keys: api_url, video_api_url, api_key, auto_leave, auto_end, "
-                "thumb_gen, video_play, lang_code, default_thumb, ping_img, start_img, "
-                "cookies_url, downloads_path"
-            )
+    if len(m.command) == 1:
+        text = (
+            "<b>📌 Runtime Settings</b>\n"
+            "Change live bot behavior without restarting.\n\n"
+            "<b>Available keys</b>\n"
+            "• auto_leave (true/false)\n"
+            "• auto_end (true/false)\n"
+            "• thumb_gen (true/false)\n"
+            "• video_play (true/false)\n"
+            "• lang_code (e.g. en, fr, de)\n"
+            "• default_thumb (image URL)\n"
+            "• ping_img (image URL)\n"
+            "• start_img (image URL)\n\n"
+            "Use <code>/settings &lt;key&gt; &lt;value&gt;</code> to update a setting.\n"
+            "Use <code>/settings &lt;key&gt;</code> to view the current value.\n\n"
+            "Examples:\n"
+            "<code>/settings auto_leave true</code>\n"
+            "<code>/settings lang_code en</code>\n"
+            "<code>/settings default_thumb https://example.com/thumb.jpg</code>\n"
+            "<code>/settings ping_img https://example.com/ping.jpg</code>\n"
         )
-    
+        await m.reply_text(text)
+        return
+
     key = m.command[1].upper()
-    value = " ".join(m.command[2:])
-    
-    # Validate keys
-    valid_keys = {
-        "API_URL", "VIDEO_API_URL", "API_KEY", "AUTO_LEAVE", "AUTO_END",
-        "THUMB_GEN", "VIDEO_PLAY", "LANG_CODE", "DEFAULT_THUMB", "PING_IMG", "START_IMG",
-        "COOKIES_URL", "DOWNLOADS_PATH"
-    }
-    
     if key not in valid_keys:
-        return await m.reply_text(f"❌ Invalid setting key: <code>{key}</code>\nValid keys: {', '.join(sorted(valid_keys))}")
-    
-    # Handle boolean values
-    if key in ("AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY"):
+        return await m.reply_text(
+            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, lang_code, default_thumb, ping_img, start_img"
+        )
+
+    if len(m.command) == 2:
+        stored_value = runtime.get(key)
+        current_value = stored_value if stored_value is not None else getattr(config, key, None)
+        await m.reply_text(
+            f"<b>{key}</b> = <code>{short(str(current_value))}</code>\n"
+            f"({'override' if stored_value is not None else 'default'})"
+        )
+        return
+
+    value = " ".join(m.command[2:]).strip()
+    if not value:
+        return await m.reply_text(f"❌ Please provide a value for <code>{key}</code>.")
+
+    if key in bool_keys:
         if value.lower() not in ("true", "false", "on", "off", "yes", "no", "1", "0"):
-            return await m.reply_text(f"❌ {key} must be true/false")
+            return await m.reply_text(
+                "❌ Boolean values must be true or false. Example: <code>true</code> or <code>false</code>."
+            )
         value = value.lower() in ("true", "on", "yes", "1")
-    
-    # Set in MongoDB and update config object
+
     await db.set_config(key, value)
     config.apply_runtime_config({key: value})
-    
-    await m.reply_text(f"✅ Setting <code>{key}</code> updated.\nValue: <code>{value}</code>")
+
+    await m.reply_text(
+        f"✅ Updated <code>{key}</code>.\n"
+        f"Current value: <code>{short(str(value))}</code>"
+    )
 
 
 @app.on_message(filters.command(["get"]) & app.sudoers & filters.private)
@@ -125,13 +122,14 @@ async def _reset_setting(_, m: types.Message):
     key = m.command[1].upper()
     
     valid_keys = {
-        "API_URL", "VIDEO_API_URL", "API_KEY", "AUTO_LEAVE", "AUTO_END",
-        "THUMB_GEN", "VIDEO_PLAY", "LANG_CODE", "DEFAULT_THUMB", "PING_IMG", "START_IMG",
-        "COOKIES_URL", "DOWNLOADS_PATH"
+        "AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY",
+        "LANG_CODE", "DEFAULT_THUMB", "PING_IMG", "START_IMG",
     }
     
     if key not in valid_keys:
-        return await m.reply_text(f"❌ Invalid setting key: <code>{key}</code>")
+        return await m.reply_text(
+            "❌ Invalid setting key. Available keys: auto_leave, auto_end, thumb_gen, video_play, lang_code, default_thumb, ping_img, start_img"
+        )
     
     # Get the original env value (reload from Config defaults)
     from config import Config as OriginalConfig
