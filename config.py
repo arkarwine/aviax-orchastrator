@@ -50,6 +50,22 @@ class Config:
         self.PING_IMG = getenv("PING_IMG", "https://files.catbox.moe/haagg2.png")
         self.START_IMG = getenv("START_IMG", "https://files.catbox.moe/zvziwk.jpg")
 
+        self._runtime_defaults = {
+            "API_URL": self.API_URL,
+            "VIDEO_API_URL": self.VIDEO_API_URL,
+            "API_KEY": self.API_KEY,
+            "AUTO_LEAVE": self.AUTO_LEAVE,
+            "AUTO_END": self.AUTO_END,
+            "THUMB_GEN": self.THUMB_GEN,
+            "VIDEO_PLAY": self.VIDEO_PLAY,
+            "LANG_CODE": self.LANG_CODE,
+            "DEFAULT_THUMB": self.DEFAULT_THUMB,
+            "PING_IMG": self.PING_IMG,
+            "START_IMG": self.START_IMG,
+            "COOKIES_URL": self.COOKIES_URL,
+            "DOWNLOADS_PATH": self.DOWNLOADS_PATH,
+        }
+
     def check(self):
         missing = [
             var
@@ -58,3 +74,26 @@ class Config:
         ]
         if missing:
             raise SystemExit(f"Missing required environment variables: {', '.join(missing)}")
+
+    def apply_runtime_config(self, config_values: dict) -> None:
+        for key, value in config_values.items():
+            if key == "DOWNLOADS_PATH":
+                self.DOWNLOADS_PATH = Path(value).resolve() if value else None
+            elif key == "COOKIES_URL":
+                if isinstance(value, str):
+                    self.COOKIES_URL = [
+                        url for url in value.split(" ") if url and "batbin.me" in url
+                    ]
+                else:
+                    self.COOKIES_URL = value or []
+            elif key in {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY"}:
+                self.__dict__[key] = bool(value)
+            elif key == "API_KEY":
+                self.API_KEY = value if value else None
+            elif hasattr(self, key):
+                setattr(self, key, value)
+
+    def reset_runtime_config(self, key: str) -> None:
+        if key in self._runtime_defaults:
+            default_value = self._runtime_defaults[key]
+            setattr(self, key, default_value)

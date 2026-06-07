@@ -248,6 +248,30 @@ class MongoDB:
             upsert=True,
         )
 
+    # RUNTIME SETTINGS METHODS
+    async def get_all_config(self) -> dict:
+        doc = await self.cache.find_one({"_id": "runtime_config"})
+        return doc.get("settings", {}) if doc else {}
+
+    async def get_config(self, key: str):
+        doc = await self.cache.find_one({"_id": "runtime_config"})
+        if not doc:
+            return None
+        return doc.get("settings", {}).get(key)
+
+    async def set_config(self, key: str, value) -> None:
+        await self.cache.update_one(
+            {"_id": "runtime_config"},
+            {"$set": {f"settings.{key}": value}},
+            upsert=True,
+        )
+
+    async def delete_config(self, key: str) -> None:
+        await self.cache.update_one(
+            {"_id": "runtime_config"},
+            {"$unset": {f"settings.{key}": ""}},
+        )
+
     # PLAY MODE METHODS
     async def get_play_mode(self, chat_id: int) -> bool:
         if chat_id not in self.admin_play:

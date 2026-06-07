@@ -24,6 +24,10 @@ async def idle():
 
 async def main():
     await db.connect()
+    runtime_settings = await db.get_all_config()
+    if runtime_settings:
+        config.apply_runtime_config(runtime_settings)
+
     await app.boot()
     await userbot.boot()
     await anon.boot()
