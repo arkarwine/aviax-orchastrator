@@ -12,6 +12,7 @@ from pyrogram.errors import (
 )
 
 from anony import anon, app, config, db, lang, userbot
+from anony.helpers import buttons
 
 
 session_setup = {}
@@ -32,28 +33,34 @@ async def claim_owner(user: types.User) -> bool:
     return True
 
 
+def setup_complete() -> bool:
+    return bool(config.OWNER_ID and config.LOGGER_ID and config.SESSION1)
+
+
 def setup_text() -> str:
-    owner = "done" if config.OWNER_ID else "pending"
-    logger = "done" if config.LOGGER_ID else "pending"
-    sessions = len([s for s in (config.SESSION1, config.SESSION2, config.SESSION3) if s])
+    if not config.OWNER_ID:
+        return "Send <code>/start</code> in private chat to claim this deployment."
+    if not config.LOGGER_ID:
+        return (
+            "<b>Setup step 1</b>\n\n"
+            "Create a log group, add this bot, promote it as admin, then run <code>/setlog</code> in that group."
+        )
+    if not config.SESSION1:
+        return (
+            "<b>Setup step 2</b>\n\n"
+            "Connect an assistant user account with <code>/addsession</code> in private chat."
+        )
     return (
-        "<b>Bot setup</b>\n\n"
-        f"Owner: <code>{owner}</code>\n"
-        f"Log group: <code>{logger}</code>\n"
-        f"Assistant sessions: <code>{sessions}/3</code>\n"
-        f"Support group: <code>{config.SUPPORT_CHAT}</code>\n"
-        f"Updates channel: <code>{config.SUPPORT_CHANNEL}</code>\n"
-        f"Language: <code>{config.LANG_CODE}</code>\n\n"
-        "<b>Next steps</b>\n"
-        "1. Create a log group, add this bot, promote it as admin, then run <code>/setlog</code> in that group.\n"
-        "2. Run <code>/addsession</code> here to connect a user assistant account.\n"
-        "3. Run <code>/support &lt;link&gt;</code>, <code>/updates &lt;link&gt;</code>, and <code>/langcode &lt;code&gt;</code>."
+        "<b>Setup step 3</b>\n\n"
+        "Optional: set <code>/support &lt;link&gt;</code>, <code>/updates &lt;link&gt;</code>, and <code>/langcode &lt;code&gt;</code>."
     )
 
 
 @app.on_message(filters.private & ~app.bl_users, group=-2)
 @lang.language()
 async def _claim_first_owner(_, m: types.Message):
+    if m.text and m.text.startswith("/start"):
+        return
     if await claim_owner(m.from_user):
         await m.reply_text(
             "You are now the owner for this deployment.\n\n" + setup_text()
@@ -80,30 +87,35 @@ async def _set_log_group(_, m: types.Message):
     if not is_owner(m.from_user.id):
         return await m.reply_text("Only the deployment owner can set the log group.")
 
+    status = await m.reply_text("Checking my admin status in this group...")
     try:
         member = await app.get_chat_member(m.chat.id, app.id)
     except Exception as exc:
-        return await m.reply_text(
+        return await status.edit_text(
             f"I could not verify my permissions in this group.\n\nReason: <code>{exc}</code>"
         )
 
     if member.status != enums.ChatMemberStatus.ADMINISTRATOR:
-        return await m.reply_text(
+        return await status.edit_text(
             "I am not an admin in this group yet. Promote me as admin, then run <code>/setlog</code> again."
         )
 
+    await status.edit_text("Saving this group as the log group...")
     await db.set_config("LOGGER_ID", m.chat.id)
     config.apply_runtime_config({"LOGGER_ID": m.chat.id})
     app.logger = m.chat.id
     started = 0
     if any([config.SESSION1, config.SESSION2, config.SESSION3]) and not userbot.clients:
+        await status.edit_text("Log group saved. Starting stored assistant session(s)...")
         await userbot.boot()
         for ub in userbot.clients:
             await anon.add_client(ub)
             started += 1
-    await m.reply_text(
+    await status.edit_text(
         "Log group configured. I can write logs here now."
         + (f"\n\nStarted {started} stored assistant session(s)." if started else "")
+        + "\n\nNext: connect an assistant user account in private chat.",
+        reply_markup=buttons.setup_next_session(),
     )
 
 
@@ -115,9 +127,10 @@ async def _set_support(_, m: types.Message):
     if len(m.command) < 2:
         return await m.reply_text("Usage: <code>/support https://t.me/your_group</code>")
     value = m.command[1].strip()
+    status = await m.reply_text("Saving support group...")
     await db.set_config("SUPPORT_CHAT", value)
     config.apply_runtime_config({"SUPPORT_CHAT": value})
-    await m.reply_text(f"Support group set to: <code>{value}</code>")
+    await status.edit_text(f"Support group set to: <code>{value}</code>")
 
 
 @app.on_message(filters.command(["updates", "channel"]) & filters.private & ~app.bl_users)
@@ -128,9 +141,10 @@ async def _set_updates(_, m: types.Message):
     if len(m.command) < 2:
         return await m.reply_text("Usage: <code>/updates https://t.me/your_channel</code>")
     value = m.command[1].strip()
+    status = await m.reply_text("Saving updates channel...")
     await db.set_config("SUPPORT_CHANNEL", value)
     config.apply_runtime_config({"SUPPORT_CHANNEL": value})
-    await m.reply_text(f"Updates channel set to: <code>{value}</code>")
+    await status.edit_text(f"Updates channel set to: <code>{value}</code>")
 
 
 @app.on_message(filters.command(["langcode"]) & filters.private & ~app.bl_users)
@@ -141,14 +155,19 @@ async def _set_lang_code(_, m: types.Message):
     if len(m.command) < 2:
         return await m.reply_text("Usage: <code>/langcode en</code>")
     value = m.command[1].strip().lower()
+    status = await m.reply_text("Saving default language...")
     await db.set_config("LANG_CODE", value)
     config.apply_runtime_config({"LANG_CODE": value})
-    await m.reply_text(f"Default language set to: <code>{value}</code>")
+    await status.edit_text(f"Default language set to: <code>{value}</code>")
 
 
 @app.on_message(filters.command(["addsession"]) & filters.private & ~app.bl_users)
 @lang.language()
 async def _add_session_start(_, m: types.Message):
+    await begin_session_setup(m)
+
+
+async def begin_session_setup(m: types.Message):
     if not is_owner(m.from_user.id):
         return await m.reply_text("Only the deployment owner can add assistant sessions.")
     if not config.LOGGER_ID:
@@ -191,14 +210,26 @@ async def _session_setup_text(_, m: types.Message):
         return
 
     if state["step"] == "phone":
+        status = await m.reply_text("Connecting to Telegram...")
         client = Client(
             name=f"session-gen-{m.from_user.id}",
             api_id=config.API_ID,
             api_hash=config.API_HASH,
             in_memory=True,
         )
-        await client.connect()
-        sent = await client.send_code(text)
+        try:
+            await client.connect()
+            await status.edit_text("Sending login code...")
+            sent = await client.send_code(text)
+        except Exception as exc:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            session_setup.pop(m.from_user.id, None)
+            return await status.edit_text(
+                f"Could not send the login code.\n\nReason: <code>{exc}</code>\n\nRun <code>/addsession</code> to try again."
+            )
         state.update(
             {
                 "step": "code",
@@ -207,7 +238,7 @@ async def _session_setup_text(_, m: types.Message):
                 "client": client,
             }
         )
-        return await m.reply_text(
+        return await status.edit_text(
             "Code sent. Reply with the login code you received.\n\n"
             "Spaces are fine; I will remove them before submitting."
         )
@@ -215,6 +246,7 @@ async def _session_setup_text(_, m: types.Message):
     if state["step"] == "code":
         code = text.replace(" ", "")
         client = state["client"]
+        status = await m.reply_text("Verifying login code...")
         try:
             await client.sign_in(
                 phone_number=state["phone"],
@@ -223,26 +255,48 @@ async def _session_setup_text(_, m: types.Message):
             )
         except SessionPasswordNeeded:
             state["step"] = "password"
-            return await m.reply_text("Two-step verification is enabled. Reply with the account password.")
+            return await status.edit_text("Two-step verification is enabled. Reply with the account password.")
         except PhoneCodeInvalid:
-            return await m.reply_text("That code was invalid. Send the latest login code again.")
+            return await status.edit_text("That code was invalid. Send the latest login code again.")
         except PhoneCodeExpired:
             await client.disconnect()
             session_setup.pop(m.from_user.id, None)
-            return await m.reply_text("That code expired. Run <code>/addsession</code> to start again.")
-        return await _finish_session(m, client)
+            return await status.edit_text("That code expired. Run <code>/addsession</code> to start again.")
+        except Exception as exc:
+            await client.disconnect()
+            session_setup.pop(m.from_user.id, None)
+            return await status.edit_text(
+                f"Could not verify the login code.\n\nReason: <code>{exc}</code>\n\nRun <code>/addsession</code> to try again."
+            )
+        return await _finish_session(m, client, status)
 
     if state["step"] == "password":
         client = state["client"]
+        status = await m.reply_text("Verifying two-step password...")
         try:
             await client.check_password(text)
         except PasswordHashInvalid:
-            return await m.reply_text("That password was incorrect. Send the correct two-step password.")
-        return await _finish_session(m, client)
+            return await status.edit_text("That password was incorrect. Send the correct two-step password.")
+        except Exception as exc:
+            await client.disconnect()
+            session_setup.pop(m.from_user.id, None)
+            return await status.edit_text(
+                f"Could not verify the password.\n\nReason: <code>{exc}</code>\n\nRun <code>/addsession</code> to try again."
+            )
+        return await _finish_session(m, client, status)
 
 
-async def _finish_session(m: types.Message, client: Client) -> None:
-    session_string = await client.export_session_string()
+async def _finish_session(m: types.Message, client: Client, status: types.Message | None = None) -> None:
+    status = status or await m.reply_text("Saving assistant session...")
+    await status.edit_text("Exporting assistant session...")
+    try:
+        session_string = await client.export_session_string()
+    except Exception as exc:
+        await client.disconnect()
+        session_setup.pop(m.from_user.id, None)
+        return await status.edit_text(
+            f"Could not export the assistant session.\n\nReason: <code>{exc}</code>\n\nRun <code>/addsession</code> to try again."
+        )
     await client.disconnect()
 
     slot = next(
@@ -250,10 +304,46 @@ async def _finish_session(m: types.Message, client: Client) -> None:
         for num, value in enumerate((config.SESSION1, config.SESSION2, config.SESSION3), start=1)
         if not value
     )
-    await db.set_config(f"SESSION{slot}", session_string)
-    started_slot = await userbot.add_session(session_string)
-    await anon.add_client(userbot.clients[-1])
+    await status.edit_text("Saving assistant session...")
+    try:
+        await db.set_config(f"SESSION{slot}", session_string)
+    except Exception as exc:
+        session_setup.pop(m.from_user.id, None)
+        return await status.edit_text(
+            f"Could not save the assistant session.\n\nReason: <code>{exc}</code>\n\nRun <code>/addsession</code> to try again."
+        )
+
+    await status.edit_text("Starting assistant account...")
+    try:
+        started_slot = await userbot.add_session(session_string)
+    except SystemExit as exc:
+        session_setup.pop(m.from_user.id, None)
+        return await status.edit_text(
+            "The assistant session was saved, but I could not start it.\n\n"
+            f"Reason: <code>{exc}</code>\n\n"
+            "Check the log group permissions, then run <code>/addsession</code> again if you want to replace or add another session."
+        )
+    except Exception as exc:
+        session_setup.pop(m.from_user.id, None)
+        return await status.edit_text(
+            "The assistant session was saved, but I could not start it.\n\n"
+            f"Reason: <code>{exc}</code>\n\n"
+            "Check the log group and Telegram login state, then run <code>/addsession</code> again if needed."
+        )
+
+    await status.edit_text("Connecting assistant to voice call engine...")
+    try:
+        await anon.add_client(userbot.clients[-1])
+    except Exception as exc:
+        session_setup.pop(m.from_user.id, None)
+        return await status.edit_text(
+            "The assistant started, but I could not connect it to the voice call engine.\n\n"
+            f"Reason: <code>{exc}</code>\n\n"
+            "Restart the bot process after checking the voice-call dependencies."
+        )
+
     session_setup.pop(m.from_user.id, None)
-    await m.reply_text(
-        f"Assistant session saved in slot {started_slot} and started successfully."
+    await status.edit_text(
+        f"Assistant session saved in slot {started_slot} and started successfully.\n\n"
+        "Next: set <code>/support &lt;link&gt;</code>, <code>/updates &lt;link&gt;</code>, and <code>/langcode &lt;code&gt;</code> if needed."
     )

@@ -107,6 +107,18 @@ class Inline:
     def ping_markup(self, text: str) -> types.InlineKeyboardMarkup:
         return self.ikm([[self.ikb(text=text, url=config.SUPPORT_CHAT)]])
 
+    def setup_next_session(self) -> types.InlineKeyboardMarkup:
+        return self.ikm(
+            [
+                [
+                    self.ikb(
+                        text="➡️ Next: Assistant Session",
+                        url=f"https://t.me/{app.username}?start=addsession",
+                    )
+                ]
+            ]
+        )
+
     def play_queued(
         self, chat_id: int, item_id: str, _text: str
     ) -> types.InlineKeyboardMarkup:

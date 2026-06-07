@@ -7,6 +7,7 @@ from pyrogram import enums, filters, types
 
 from anony import app, config, db, lang
 from anony.helpers import buttons, utils
+from anony.plugins.setup import begin_session_setup, claim_owner, setup_complete, setup_text
 
 
 @app.on_message(filters.command(["help"]) & filters.private & ~app.bl_users)
@@ -25,10 +26,17 @@ async def start(_, message: types.Message):
     if message.from_user.id in app.bl_users and message.from_user.id not in db.notified:
         return await message.reply_text(message.lang["bl_user_notify"])
 
+    private = message.chat.type == enums.ChatType.PRIVATE
+    if private and len(message.command) > 1 and message.command[1] == "addsession":
+        return await begin_session_setup(message)
+
+    if private and not setup_complete():
+        await claim_owner(message.from_user)
+        return await message.reply_text(setup_text())
+
     if len(message.command) > 1 and message.command[1] == "help":
         return await _help(_, message)
 
-    private = message.chat.type == enums.ChatType.PRIVATE
     _text = (
         f"🎵 {message.lang['start_pm'].format(message.from_user.first_name, app.name)}"
         if private
