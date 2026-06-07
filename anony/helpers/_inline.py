@@ -151,10 +151,7 @@ class Inline:
         if private:
             rows += [
                 [
-                    self.ikb(
-                        text=lang["source"],
-                        url="https://github.com/AnonymousX1025/AnonXMusic",
-                    )
+                    self.ikb(text="Owner", url=f"tg://user?id={app.owner}")
                 ]
             ]
         else:
