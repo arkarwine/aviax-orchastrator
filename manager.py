@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.errors import RPCError
 from pyrogram.types import Message, ReplyParameters
 import psutil
@@ -444,13 +444,15 @@ class BotManager:
             await temp.stop()
 
     def _prepare_child(self) -> None:
-        os.setsid()
+        # Detach child into its own session so signals to the manager
+        # do not directly target the child's process group. Previously
+        # we attempted to set PR_SET_PDEATHSIG so the child would
+        # receive SIGTERM when the parent died; remove that behavior
+        # so deployments continue running when the manager stops.
         try:
-            PR_SET_PDEATHSIG = 1
-            libc = ctypes.CDLL("libc.so.6")
-            libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+            os.setsid()
         except Exception as exc:
-            logger.debug("Unable to set parent death signal for child process: %s", exc)
+            logger.debug("Unable to setsid child process: %s", exc)
 
     def _log_task_exception(self, task: asyncio.Task) -> None:
         if task.cancelled():
@@ -602,18 +604,48 @@ class BotManager:
         signal.signal(signal.SIGINT, self._shutdown_handler)
         signal.signal(signal.SIGTERM, self._shutdown_handler)
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        self.monitor_thread.start()
         try:
-            self.app.run()
+            # Start the bot client so the event loop is available for notifications
+            self.app.start()
+
+            # start monitor thread after app started
+            self.monitor_thread.start()
+
+            # Auto-start stored deployments (if any). We do not restart deployments
+            # that appear to be already running (pid check). Notify owner on failures.
+            for deployment in list(self.store.list().values()):
+                if deployment.is_running:
+                    logger.info("Deployment %s already running (pid=%s), skipping auto-start.", deployment.name, deployment.pid)
+                    continue
+                logger.info("Auto-starting deployment %s", deployment.name)
+                started, error = self.start_process(deployment)
+                if started:
+                    deployment.started_at = datetime.now(timezone.utc).isoformat()
+                    self.store.update(deployment)
+                    logger.info("Auto-started deployment %s pid=%s", deployment.name, deployment.pid)
+                else:
+                    logger.error("Auto-start failed for %s: %s", deployment.name, error)
+                    try:
+                        self._notify_owner(f"⚠️ Failed to auto-start deployment <b>{deployment.name}</b>: {error}")
+                    except Exception:
+                        logger.exception("Failed to notify owner about auto-start failure for %s", deployment.name)
+
+            # Block until stop signal; idle keeps the client running.
+            idle()
         finally:
+            # Shutdown sequence
             self.shutdown_event.set()
             if self.monitor_thread.is_alive():
                 self.monitor_thread.join(timeout=2)
+            try:
+                self.app.stop()
+            except Exception:
+                logger.exception("Error while stopping manager app")
 
     def _shutdown_handler(self, signum, frame):
-        logger.info("Manager received signal %s, stopping deployments...", signum)
+        logger.info("Manager received signal %s, shutting down manager only.", signum)
+        # Do not stop managed deployments here; leave them running.
         self.shutdown_event.set()
-        self.stop_all()
         logger.info("Exiting manager.")
         sys.exit(0)
 
