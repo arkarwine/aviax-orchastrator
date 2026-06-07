@@ -11,53 +11,6 @@ from anony import anon, app, db, lang, queue, tg, yt
 from anony.helpers import admin_check, buttons, can_manage_vc
 
 
-async def _help_access_note(section: str, query: types.CallbackQuery) -> str | None:
-    private = query.message.chat.type == enums.ChatType.PRIVATE
-    user_id = query.from_user.id
-    chat_id = query.message.chat.id
-
-    group_only = {
-        "admins": "Admins commands work only in groups where the bot can read the chat and inspect admins.",
-        "auth": "Auth commands work only in groups, because they manage who can control the current chat.",
-        "blist": "Blacklist commands work only in groups and are meant for chat moderation.",
-        "settings": "Settings work only in groups, because they change a chat's playback behavior.",
-        "stats": "Stats works in groups, but sudo-only details appear only for sudo users.",
-    }
-
-    if section in {"lang", "ping", "play", "queue"}:
-        return None
-
-    if section == "sudo":
-        if user_id == app.owner or user_id in app.sudoers:
-            return None
-        return "Sudo commands work only for the owner and sudo users."
-
-    if section in group_only and private:
-        return group_only[section]
-
-    if section == "admins":
-        admins = await db.get_admins(chat_id)
-        if user_id in admins or user_id in app.sudoers or user_id == app.owner:
-            return None
-        return "Admins commands work only in groups and require you to be a chat admin or sudo user."
-
-    if section == "auth":
-        admins = await db.get_admins(chat_id)
-        if user_id in admins or user_id in app.sudoers or user_id == app.owner:
-            return None
-        return "Auth commands work only in groups and require admin rights or sudo access."
-
-    if section == "blist":
-        if user_id in app.sudoers or user_id == app.owner:
-            return None
-        return "Blacklist commands work only in groups and are restricted to sudo users."
-
-    if section == "stats":
-        return None
-
-    return None
-
-
 @app.on_callback_query(filters.regex("cancel_dl") & ~app.bl_users)
 @lang.language()
 async def cancel_dl(_, query: types.CallbackQuery):
@@ -190,10 +143,6 @@ async def _help(_, query: types.CallbackQuery):
             return await query.message.reply_to_message.delete()
         except Exception:
             return
-
-    note = await _help_access_note(data[1], query)
-    if note:
-        return await query.answer(note, show_alert=True)
 
     await query.edit_message_text(
         text=f"📘 {query.lang[f'help_{data[1]}']}",

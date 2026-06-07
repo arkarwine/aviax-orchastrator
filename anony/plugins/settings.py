@@ -8,7 +8,7 @@ from pyrogram import enums, filters, types
 from anony import app, config, db, lang
 
 
-@app.on_message(filters.command(["settings", "set"]) & ~app.bl_users)
+@app.on_message(filters.command(["config", "getconfig", "setconfig"]) & ~app.bl_users)
 @lang.language()
 async def _settings(_, m: types.Message):
     """Show runtime setting help or update a setting when key/value are provided."""
@@ -51,13 +51,13 @@ async def _settings(_, m: types.Message):
             "• default_thumb (image URL)\n"
             "• ping_img (image URL)\n"
             "• start_img (image URL)\n\n"
-            "Use <code>/settings &lt;key&gt; &lt;value&gt;</code> to update a setting.\n"
-            "Use <code>/settings &lt;key&gt;</code> to view the current value.\n\n"
+            "Use <code>/config &lt;key&gt; &lt;value&gt;</code> to update a setting.\n"
+            "Use <code>/config &lt;key&gt;</code> to view the current value.\n\n"
             "Examples:\n"
-            "<code>/settings auto_leave true</code>\n"
-            "<code>/settings lang_code en</code>\n"
-            "<code>/settings default_thumb https://example.com/thumb.jpg</code>\n"
-            "<code>/settings ping_img https://example.com/ping.jpg</code>\n"
+            "<code>/config auto_leave true</code>\n"
+            "<code>/config lang_code en</code>\n"
+            "<code>/config default_thumb https://example.com/thumb.jpg</code>\n"
+            "<code>/config ping_img https://example.com/ping.jpg</code>\n"
         )
         await m.reply_text(text)
         return
@@ -97,10 +97,10 @@ async def _settings(_, m: types.Message):
     )
 
 
-@app.on_message(filters.command(["get"]) & ~app.bl_users)
+@app.on_message(filters.command(["getconfig"]) & ~app.bl_users)
 @lang.language()
 async def _get_setting(_, m: types.Message):
-    """Get a specific setting value. Usage: /get KEY"""
+    """Get a specific setting value. Usage: /getconfig KEY"""
     if m.chat.type != enums.ChatType.PRIVATE:
         return await m.reply_text(
             "This command works in private chats only, because it reads live bot settings."
@@ -111,7 +111,7 @@ async def _get_setting(_, m: types.Message):
         )
 
     if len(m.command) < 2:
-        return await m.reply_text("Usage: /get &lt;key&gt;")
+        return await m.reply_text("Usage: /getconfig &lt;key&gt;")
     
     key = m.command[1].upper()
     value = await db.get_config(key)
@@ -130,10 +130,10 @@ async def _get_setting(_, m: types.Message):
     await m.reply_text(f"<code>{key}</code> = <code>{value}</code>\n(override)")
 
 
-@app.on_message(filters.command(["reset"]) & ~app.bl_users)
+@app.on_message(filters.command(["setconfig"]) & ~app.bl_users)
 @lang.language()
 async def _reset_setting(_, m: types.Message):
-    """Reset a setting to its default (environment) value. Usage: /reset KEY"""
+    """Reset a setting to its default (environment) value. Usage: /setconfig KEY"""
     if m.chat.type != enums.ChatType.PRIVATE:
         return await m.reply_text(
             "This command works in private chats only, because it resets live bot settings."
@@ -144,7 +144,7 @@ async def _reset_setting(_, m: types.Message):
         )
 
     if len(m.command) < 2:
-        return await m.reply_text("Usage: /reset &lt;key&gt;")
+        return await m.reply_text("Usage: /setconfig &lt;key&gt;")
     
     key = m.command[1].upper()
     

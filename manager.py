@@ -233,6 +233,7 @@ class BotManager:
         self.app.on_message(filters.private & filters.command("status") & filters.user(self.config.owner_id))(self.status)
         self.app.on_message(filters.private & filters.command("deploy") & filters.user(self.config.owner_id))(self.deploy)
         self.app.on_message(filters.private & filters.command("stop") & filters.user(self.config.owner_id))(self.stop)
+        self.app.on_message(filters.private & filters.command("restart") & filters.user(self.config.owner_id))(self.restart)
 
     @handler_errors
     async def start(self, client: Client, message: Message) -> None:
@@ -250,7 +251,8 @@ class BotManager:
             "/list - Show all deployments.\n"
             "/status &lt;name&gt; - Show deployment status.\n"
             "/deploy &lt;name&gt; - Start a stopped deployment.\n"
-            "/stop &lt;name&gt; - Stop a running deployment.\n",
+            "/stop &lt;name&gt; - Stop a running deployment.\n"
+            "/restart - Restart the manager bot.\n",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
 
@@ -341,6 +343,19 @@ class BotManager:
                 f"Failed to stop deployment <b>{name}</b>: {error}",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
+
+    @handler_errors
+    async def restart(self, client: Client, message: Message) -> None:
+        await message.reply_text(
+            "Restarting manager bot...",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+        self.shutdown_event.set()
+        try:
+            self.app.stop()
+        except Exception:
+            pass
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     @handler_errors
     async def newbot(self, client: Client, message: Message) -> None:
@@ -497,6 +512,27 @@ class BotManager:
                 f"⚠️ Failed to send deployment log for <b>{deployment.name}</b>: {exc}"
             )
 
+    def _find_running_deployment_process(self, deployment: DeploymentMeta) -> Optional[psutil.Process]:
+        target_path = deployment.deployment_path.resolve()
+        for proc in psutil.process_iter(["pid", "cwd", "cmdline"]):
+            try:
+                cmdline = proc.info.get("cmdline") or []
+                cwd = proc.info.get("cwd")
+                if not cmdline or len(cmdline) < 3:
+                    continue
+                if Path(cwd).resolve() != target_path:
+                    continue
+                if cmdline[0] != sys.executable:
+                    continue
+                if cmdline[1:3] != ["-m", "anony"]:
+                    continue
+                if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+                    continue
+                return proc
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError, TypeError, ValueError):
+                continue
+        return None
+
     def _monitor_loop(self) -> None:
         logger.info("Deployment watcher started with interval %s seconds.", self.monitor_interval)
         while not self.shutdown_event.wait(self.monitor_interval):
@@ -614,6 +650,13 @@ class BotManager:
             # Auto-start stored deployments (if any). We do not restart deployments
             # that appear to be already running (pid check). Notify owner on failures.
             for deployment in list(self.store.list().values()):
+                proc = self._find_running_deployment_process(deployment)
+                if proc:
+                    deployment.pid = proc.pid
+                    self.store.update(deployment)
+                    logger.info("Deployment %s already running (pid=%s), skipping auto-start.", deployment.name, deployment.pid)
+                    continue
+
                 if deployment.is_running:
                     logger.info("Deployment %s already running (pid=%s), skipping auto-start.", deployment.name, deployment.pid)
                     continue

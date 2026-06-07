@@ -159,9 +159,9 @@ class Inline:
         self, lang: dict, private: bool = False
     ) -> types.InlineKeyboardMarkup:
         rows = [
-                [
-                    self.ikb(
-                        text=f"➕ {lang['add_me']}",
+            [
+                self.ikb(
+                    text=f"➕ {lang['add_me']}",
                     url=f"https://t.me/{app.username}?startgroup=true",
                 )
             ],
