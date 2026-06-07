@@ -569,16 +569,50 @@ class BotManager:
         log_file = deployment.deployment_path / "run.log"
         logger.info("Starting deployment %s at %s", deployment.name, deployment.deployment_path)
         try:
-            process = subprocess.Popen(
-                [sys.executable, "-m", "anony"],
-                cwd=deployment.deployment_path,
-                env=env,
-                stdout=log_file.open("a", encoding="utf-8"),
-                stderr=subprocess.STDOUT,
-                preexec_fn=self._prepare_child,
-            )
-            deployment.pid = process.pid
-            self.processes[deployment.name] = process
+            if os.name == "posix":
+                read_fd, write_fd = os.pipe()
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        os.close(read_fd)
+                        os.setsid()
+                        pid2 = os.fork()
+                        if pid2 > 0:
+                            os.write(write_fd, str(pid2).encode("utf-8"))
+                            os.close(write_fd)
+                            os._exit(0)
+
+                        os.close(write_fd)
+                        with open(os.devnull, "rb") as stdin, log_file.open("a", encoding="utf-8") as stdout:
+                            os.dup2(stdin.fileno(), 0)
+                            os.dup2(stdout.fileno(), 1)
+                            os.dup2(stdout.fileno(), 2)
+                            os.chdir(deployment.deployment_path)
+                            os.execvpe(sys.executable, [sys.executable, "-m", "anony"], env)
+                    except Exception as exc:
+                        logger.error("Daemon launch failed for %s: %s", deployment.name, exc)
+                        os._exit(1)
+
+                os.close(write_fd)
+                child_pid_bytes = os.read(read_fd, 32)
+                os.close(read_fd)
+                if not child_pid_bytes:
+                    os.waitpid(pid, 0)
+                    return False, "Failed to capture deployment pid."
+
+                os.waitpid(pid, 0)
+                deployment.pid = int(child_pid_bytes.decode("utf-8").strip())
+                self.processes[deployment.name] = None
+            else:
+                process = subprocess.Popen(
+                    [sys.executable, "-m", "anony"],
+                    cwd=deployment.deployment_path,
+                    env=env,
+                    stdout=log_file.open("a", encoding="utf-8"),
+                    stderr=subprocess.STDOUT,
+                )
+                deployment.pid = process.pid
+                self.processes[deployment.name] = process
             self.failed_restarts.discard(deployment.name)
             logger.info("Deployment %s started with pid=%s", deployment.name, deployment.pid)
             return True, None
