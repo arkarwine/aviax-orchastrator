@@ -10,6 +10,7 @@ class Config:
         self.API_HASH = getenv("API_HASH")
 
         self.NAME = getenv("NAME", "Aviax Music")
+        self.DB_NAME = getenv("DB_NAME", self.NAME)
         self.BOT_TOKEN = getenv("BOT_TOKEN")
         self.MONGO_URL = getenv("MONGO_URL")
 

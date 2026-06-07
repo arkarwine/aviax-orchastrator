@@ -4,14 +4,19 @@
 
 
 import pyrogram
+from pathlib import Path
 
 from anony import config, logger
 
 
 class Bot(pyrogram.Client):
     def __init__(self):
+        session_name = "Anony"
+        if config.SESSION_PATH:
+            session_name = str(Path(config.SESSION_PATH) / session_name)
+
         super().__init__(
-            name="Anony",
+            name=session_name,
             api_id=config.API_ID,
             api_hash=config.API_HASH,
             bot_token=config.BOT_TOKEN,

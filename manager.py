@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,32 @@ import psutil
 ROOT = Path(__file__).resolve().parent
 MANAGER_ENV = ROOT / "manager.env"
 STORE_PATH = ROOT / "manager_deployments.json"
+DEPLOYMENT_ENV_KEYS = {
+    "API_ID",
+    "API_HASH",
+    "BOT_TOKEN",
+    "MONGO_URL",
+    "DB_NAME",
+    "NAME",
+    "OWNER_ID",
+    "LOGGER_ID",
+    "SESSION",
+    "SESSION2",
+    "SESSION3",
+    "SESSION_PATH",
+    "SUPPORT_CHAT",
+    "SUPPORT_CHANNEL",
+    "LANG_CODE",
+    "API_URL",
+    "VIDEO_API_URL",
+    "API_KEY",
+    "DOWNLOADS_PATH",
+    "AUTO_LEAVE",
+    "AUTO_END",
+    "THUMB_GEN",
+    "VIDEO_PLAY",
+    "COOKIES_URL",
+}
 
 load_dotenv(MANAGER_ENV)
 
@@ -91,6 +118,7 @@ class DeploymentMeta:
     username: str
     created_at: str
     path: str
+    db_name: Optional[str] = None
     pid: Optional[int] = None
     started_at: Optional[str] = None
 
@@ -176,6 +204,7 @@ def env_from_template(**values: str) -> Dict[str, str]:
         "API_HASH": values["api_hash"],
         "BOT_TOKEN": values["bot_token"],
         "MONGO_URL": values["mongo_url"],
+        "DB_NAME": values["db_name"],
         "SESSION_PATH": values["session_path"],
         "NAME": values["name"],
         "AUTO_LEAVE": "False",
@@ -282,6 +311,7 @@ class BotManager:
             f"<b>{deployment.username}</b>\n"
             f"Name: <code>{deployment.name}</code>\n"
             f"Bot ID: <code>{deployment.bot_id}</code>\n"
+            f"DB: <code>{deployment.db_name or 'legacy'}</code>\n"
             f"Status: <code>{state}</code>\n"
             f"PID: <code>{deployment.pid or 'none'}</code>\n"
             f"Created: {deployment.created_at}\n"
@@ -395,11 +425,13 @@ class BotManager:
         if manager_downloads_path and not Path(manager_downloads_path).is_absolute():
             manager_downloads_path = str((ROOT / manager_downloads_path).resolve())
 
+        db_name = normalize_name(f"{name}_{bot_user.id}_{uuid.uuid4().hex[:8]}")
         env_vars = env_from_template(
             api_id=self.config.api_id,
             api_hash=self.config.api_hash,
             bot_token=bot_token,
             mongo_url=mongo_url,
+            db_name=db_name,
             session_path=str(deployment_dir),
             name=name,
             api_url=os.getenv("DEFAULT_API_URL", ""),
@@ -415,6 +447,7 @@ class BotManager:
             username=f"@{bot_user.username}" if bot_user.username else bot_user.first_name,
             created_at=datetime.now(timezone.utc).isoformat(),
             path=str(deployment_dir.relative_to(ROOT)),
+            db_name=db_name,
         )
 
         started, error = self.start_process(deployment)
@@ -425,6 +458,7 @@ class BotManager:
             await message.reply_text(
                 f"Deployment <b>{name}</b> created and started.\n"
                 f"Bot: <code>{deployment.username}</code>\n"
+                f"DB: <code>{deployment.db_name}</code>\n"
                 f"Path: <code>{deployment.deployment_path}</code>",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
@@ -442,6 +476,7 @@ class BotManager:
             api_id=self.config.api_id,
             api_hash=self.config.api_hash,
             bot_token=bot_token,
+            in_memory=True,
         )
         await temp.start()
         try:
@@ -547,6 +582,8 @@ class BotManager:
 
     def start_process(self, deployment: DeploymentMeta) -> tuple[bool, Optional[str]]:
         env = os.environ.copy()
+        for key in DEPLOYMENT_ENV_KEYS:
+            env.pop(key, None)
         deployment_env = self.load_deployment_env(deployment.deployment_path / ".env")
         env.update(deployment_env)
         manager_downloads_path = os.getenv("MANAGER_DOWNLOADS_PATH")
