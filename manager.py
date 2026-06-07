@@ -437,13 +437,16 @@ class BotManager:
         except Exception as exc:
             logger.debug("Unable to set parent death signal for child process: %s", exc)
 
-    def _notify_owner(self, text: str) -> None:
+    def _run_on_app_loop(self, func, *args, **kwargs) -> None:
         if not hasattr(self.app, "loop"):
             return
         try:
-            asyncio.run_coroutine_threadsafe(self.app.send_message(self.config.owner_id, text), self.app.loop)
+            self.app.loop.call_soon_threadsafe(func, *args, **kwargs)
         except Exception as exc:
-            logger.warning("Could not send owner notification: %s", exc)
+            logger.warning("Failed to schedule app call %s: %s", func.__name__, exc)
+
+    def _notify_owner(self, text: str) -> None:
+        self._run_on_app_loop(self.app.send_message, self.config.owner_id, text)
 
     def _send_deployment_log(self, deployment: DeploymentMeta) -> None:
         log_path = deployment.deployment_path / "run.log"
@@ -454,13 +457,11 @@ class BotManager:
             return
 
         try:
-            asyncio.run_coroutine_threadsafe(
-                self.app.send_document(
-                    self.config.owner_id,
-                    str(log_path),
-                    caption=f"Deployment <b>{deployment.name}</b> error log",
-                ),
-                self.app.loop,
+            self._run_on_app_loop(
+                self.app.send_document,
+                self.config.owner_id,
+                str(log_path),
+                caption=f"Deployment <b>{deployment.name}</b> error log",
             )
         except Exception as exc:
             logger.warning("Could not send deployment log for %s: %s", deployment.name, exc)
