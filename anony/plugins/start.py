@@ -14,7 +14,11 @@ from anony.helpers import buttons, utils
 async def _help(_, m: types.Message):
     await m.reply_text(
         text=m.lang["help_menu"],
-        reply_markup=buttons.help_markup(m.lang),
+        reply_markup=await buttons.help_markup(
+            m.lang,
+            chat_id=m.chat.id if m.chat.type != enums.ChatType.PRIVATE else None,
+            user_id=m.from_user.id,
+        ),
         quote=True,
     )
 

@@ -5,7 +5,7 @@
 
 from pyrogram import types
 
-from anony import app, config, lang
+from anony import app, config, db, lang
 from anony.core.lang import lang_codes
 
 
@@ -46,8 +46,12 @@ class Inline:
             )
         return self.ikm(keyboard)
 
-    def help_markup(
-        self, _lang: dict, back: bool = False
+    async def help_markup(
+        self,
+        _lang: dict,
+        back: bool = False,
+        chat_id: int | None = None,
+        user_id: int | None = None,
     ) -> types.InlineKeyboardMarkup:
         if back:
             rows = [
@@ -58,9 +62,30 @@ class Inline:
             ]
         else:
             cbs = ["admins", "auth", "blist", "lang", "ping", "play", "queue", "stats", "sudo"]
+            allowed = {
+                "lang",
+                "ping",
+                "play",
+                "queue",
+            }
+            if user_id is not None and user_id == app.owner:
+                allowed.add("sudo")
+                if chat_id is not None:
+                    allowed.update({"admins", "auth", "blist", "stats"})
+            elif user_id is not None and user_id in app.sudoers:
+                allowed.add("sudo")
+                if chat_id is not None:
+                    allowed.update({"admins", "auth", "blist", "stats"})
+            elif chat_id is not None:
+                allowed.add("stats")
+                admins = await db.get_admins(chat_id)
+                if user_id in admins:
+                    allowed.update({"admins", "auth", "blist"})
+
             buttons = [
                 self.ikb(text=_lang[f"help_{i}"], callback_data=f"help {cb}")
                 for i, cb in enumerate(cbs)
+                if cb in allowed
             ]
             rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
 

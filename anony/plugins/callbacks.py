@@ -5,7 +5,7 @@
 
 import re
 
-from pyrogram import errors, filters, types
+from pyrogram import enums, errors, filters, types
 
 from anony import anon, app, db, lang, queue, tg, yt
 from anony.helpers import admin_check, buttons, can_manage_vc
@@ -132,7 +132,12 @@ async def _help(_, query: types.CallbackQuery):
 
     if data[1] == "back":
         return await query.edit_message_text(
-            text=query.lang["help_menu"], reply_markup=buttons.help_markup(query.lang)
+            text=query.lang["help_menu"],
+            reply_markup=await buttons.help_markup(
+                query.lang,
+                chat_id=query.message.chat.id if query.message.chat.type != enums.ChatType.PRIVATE else None,
+                user_id=query.from_user.id,
+            ),
         )
     elif data[1] == "close":
         try:
@@ -143,7 +148,12 @@ async def _help(_, query: types.CallbackQuery):
 
     await query.edit_message_text(
         text=query.lang[f"help_{data[1]}"],
-        reply_markup=buttons.help_markup(query.lang, True),
+        reply_markup=await buttons.help_markup(
+            query.lang,
+            True,
+            chat_id=query.message.chat.id if query.message.chat.type != enums.ChatType.PRIVATE else None,
+            user_id=query.from_user.id,
+        ),
     )
 
 
