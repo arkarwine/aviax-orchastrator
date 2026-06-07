@@ -44,6 +44,7 @@ class ManagerConfig:
     default_logger_id: Optional[int]
     deployments_dir: Path
     template_path: Path
+    api_key: Optional[str]
 
     @classmethod
     def load(cls) -> "ManagerConfig":
@@ -55,6 +56,7 @@ class ManagerConfig:
         default_logger_id = os.getenv("MANAGER_DEFAULT_LOGGER_ID")
         deployments_dir = Path(os.getenv("DEPLOYMENTS_DIR", "deployments")).resolve()
         template_path = Path(os.getenv("TEMPLATE_PATH", ".")).resolve()
+        api_key = os.getenv("MANAGER_API_KEY")
 
         missing = []
         if api_id <= 0:
@@ -78,6 +80,7 @@ class ManagerConfig:
             default_logger_id=int(default_logger_id) if default_logger_id else None,
             deployments_dir=deployments_dir,
             template_path=template_path,
+            api_key=api_key,
         )
 
 
@@ -189,6 +192,8 @@ def env_from_template(**values: str) -> Dict[str, str]:
             env[key] = default
     if values.get("downloads_path"):
         env["DOWNLOADS_PATH"] = values["downloads_path"]
+    if values.get("api_key"):
+        env["API_KEY"] = values["api_key"]
     return env
 
 
@@ -392,6 +397,7 @@ class BotManager:
             api_url=os.getenv("DEFAULT_API_URL", ""),
             video_api_url=os.getenv("DEFAULT_VIDEO_API_URL", ""),
             downloads_path=manager_downloads_path,
+            api_key=self.config.api_key,
         )
         env_path.write_text("\n".join(f"{key}={value}" for key, value in env_vars.items()), encoding="utf-8")
 
@@ -517,6 +523,8 @@ class BotManager:
             if not Path(manager_downloads_path).is_absolute():
                 manager_downloads_path = str((ROOT / manager_downloads_path).resolve())
             env["DOWNLOADS_PATH"] = manager_downloads_path
+        if self.config.api_key:
+            env["API_KEY"] = self.config.api_key
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONPATH"] = str(self.config.template_path)
 
