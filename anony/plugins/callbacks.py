@@ -132,7 +132,7 @@ async def _help(_, query: types.CallbackQuery):
 
     if data[1] == "back":
         return await query.edit_message_text(
-            text=query.lang["help_menu"],
+            text=f"❔ {query.lang['help_menu']}",
             reply_markup=await buttons.help_markup(
                 query.lang,
                 chat_id=query.message.chat.id if query.message.chat.type != enums.ChatType.PRIVATE else None,
@@ -147,7 +147,7 @@ async def _help(_, query: types.CallbackQuery):
             return
 
     await query.edit_message_text(
-        text=query.lang[f"help_{data[1]}"],
+        text=f"📘 {query.lang[f'help_{data[1]}']}",
         reply_markup=await buttons.help_markup(
             query.lang,
             True,

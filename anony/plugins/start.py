@@ -13,7 +13,7 @@ from anony.helpers import buttons, utils
 @lang.language()
 async def _help(_, m: types.Message):
     await m.reply_text(
-        text=m.lang["help_menu"],
+        text=f"❔ {m.lang['help_menu']}",
         reply_markup=await buttons.help_markup(
             m.lang,
             chat_id=m.chat.id if m.chat.type != enums.ChatType.PRIVATE else None,
@@ -34,9 +34,9 @@ async def start(_, message: types.Message):
 
     private = message.chat.type == enums.ChatType.PRIVATE
     _text = (
-        message.lang["start_pm"].format(message.from_user.first_name, app.name)
+        f"🎵 {message.lang['start_pm'].format(message.from_user.first_name, app.name)}"
         if private
-        else message.lang["start_gp"].format(app.name)
+        else f"🎵 {message.lang['start_gp'].format(app.name)}"
     )
 
     key = buttons.start_key(message.lang, private)
