@@ -439,13 +439,22 @@ class BotManager:
         except Exception as exc:
             logger.debug("Unable to set parent death signal for child process: %s", exc)
 
+    def _log_task_exception(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.warning("Scheduled app task failed: %s", exc, exc_info=exc)
+
     def _run_on_app_loop(self, func, *args, **kwargs) -> None:
         if not hasattr(self.app, "loop"):
             return
         try:
-            self.app.loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(func(*args, **kwargs))
-            )
+            def schedule() -> None:
+                task = asyncio.create_task(func(*args, **kwargs))
+                task.add_done_callback(self._log_task_exception)
+
+            self.app.loop.call_soon_threadsafe(schedule)
         except Exception as exc:
             logger.warning("Failed to schedule app call %s: %s", func.__name__, exc)
 
@@ -466,7 +475,6 @@ class BotManager:
                 self.config.owner_id,
                 str(log_path),
                 caption=f"Deployment <b>{deployment.name}</b> error log",
-                parse_mode="html",
             )
         except Exception as exc:
             logger.warning("Could not send deployment log for %s: %s", deployment.name, exc)
