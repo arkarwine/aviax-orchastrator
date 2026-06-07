@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import asyncio
+import ctypes
 import json
 import logging
 import os
@@ -6,6 +8,8 @@ import re
 import signal
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -117,18 +121,23 @@ class DeploymentStore:
 
     def load(self) -> None:
         if not self.store_path.exists():
+            logger.info("Deployment store not found, starting with empty store.")
             self.deployments = {}
             return
         try:
+            logger.info("Loading deployment store from %s", self.store_path)
             data = json.loads(self.store_path.read_text(encoding="utf-8"))
             self.deployments = {
                 name: DeploymentMeta.from_dict(item)
                 for name, item in data.get("deployments", {}).items()
             }
-        except json.JSONDecodeError:
+            logger.info("Loaded %d deployments.", len(self.deployments))
+        except json.JSONDecodeError as exc:
+            logger.warning("Failed to parse deployment store %s: %s", self.store_path, exc)
             self.deployments = {}
 
     def save(self) -> None:
+        logger.info("Saving %d deployments to %s", len(self.deployments), self.store_path)
         self.store_path.write_text(
             json.dumps(
                 {"deployments": {name: deployment.to_dict() for name, deployment in self.deployments.items()}},
@@ -180,16 +189,33 @@ def env_from_template(**values: str) -> Dict[str, str]:
     return env
 
 
+def handler_errors(func):
+    async def wrapper(self, client: Client, message: Message):
+        try:
+            await func(self, client, message)
+        except Exception as exc:
+            logger.exception("Handler %s failed: %s", func.__name__, exc)
+            await message.reply_text(
+                "⚠️ An internal error occurred while processing your request. Check the manager logs for details.",
+                quote=True,
+            )
+    return wrapper
+
+
 class BotManager:
     def __init__(self, config: ManagerConfig, store: DeploymentStore) -> None:
         self.config = config
         self.store = store
+        self.shutdown_event = threading.Event()
+        self.monitor_interval = int(os.getenv("MANAGER_MONITOR_INTERVAL", "20"))
+        self.processes: Dict[str, subprocess.Popen] = {}
         self.app = Client(
             name="deploy-manager",
             api_id=self.config.api_id,
             api_hash=self.config.api_hash,
             bot_token=self.config.bot_token,
         )
+        logger.info("Manager bot configured for owner_id=%s and deployments_dir=%s", self.config.owner_id, self.config.deployments_dir)
 
         self.app.on_message(filters.private & filters.command("start") & filters.user(self.config.owner_id))(self.start)
         self.app.on_message(filters.private & filters.command("help") & filters.user(self.config.owner_id))(self.help)
@@ -199,6 +225,7 @@ class BotManager:
         self.app.on_message(filters.private & filters.command("deploy") & filters.user(self.config.owner_id))(self.deploy)
         self.app.on_message(filters.private & filters.command("stop") & filters.user(self.config.owner_id))(self.stop)
 
+    @handler_errors
     async def start(self, client: Client, message: Message) -> None:
         await message.reply_text(
             "<b>Music Bot Deployment Manager</b>\n"
@@ -206,6 +233,7 @@ class BotManager:
             quote=True,
         )
 
+    @handler_errors
     async def help(self, client: Client, message: Message) -> None:
         await message.reply_text(
             "<b>Manager Commands</b>\n"
@@ -217,6 +245,7 @@ class BotManager:
             quote=True,
         )
 
+    @handler_errors
     async def list_bots(self, client: Client, message: Message) -> None:
         if not self.store.list():
             return await message.reply_text("No deployments found.", quote=True)
@@ -229,6 +258,7 @@ class BotManager:
             )
         await message.reply_text("\n".join(lines), quote=True)
 
+    @handler_errors
     async def status(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
@@ -252,6 +282,7 @@ class BotManager:
         )
         await message.reply_text(text, quote=True)
 
+    @handler_errors
     async def deploy(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
@@ -266,13 +297,18 @@ class BotManager:
             return await message.reply_text(f"Deployment <b>{name}</b> is already running.", quote=True)
 
         await message.reply_text(f"Starting deployment <b>{name}</b>...", quote=True)
-        success = self.start_process(deployment)
-        if success:
+        started, error = self.start_process(deployment)
+        if started:
             self.store.update(deployment)
             await message.reply_text(f"Deployment <b>{name}</b> started.", quote=True)
         else:
-            await message.reply_text(f"Failed to start deployment <b>{name}</b>.", quote=True)
+            logger.error("Failed to start deployment %s: %s", name, error)
+            await message.reply_text(
+                f"Failed to start deployment <b>{name}</b>: {error}",
+                quote=True,
+            )
 
+    @handler_errors
     async def stop(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
@@ -286,12 +322,18 @@ class BotManager:
         if not deployment.is_running:
             return await message.reply_text(f"Deployment <b>{name}</b> is not running.", quote=True)
 
-        if self.stop_process(deployment):
+        stopped, error = self.stop_process(deployment)
+        if stopped:
             self.store.update(deployment)
             await message.reply_text(f"Deployment <b>{name}</b> stopped.", quote=True)
         else:
-            await message.reply_text(f"Failed to stop deployment <b>{name}</b>.", quote=True)
+            logger.error("Failed to stop deployment %s: %s", name, error)
+            await message.reply_text(
+                f"Failed to stop deployment <b>{name}</b>: {error}",
+                quote=True,
+            )
 
+    @handler_errors
     async def newbot(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=4)
         if len(args) < 4:
@@ -304,8 +346,10 @@ class BotManager:
         bot_token = args[2].strip()
         session_string = args[3].strip()
         mongo_url = args[4].strip() if len(args) > 4 else self.config.default_mongo_url
+        logger.info("Received newbot request for %s", name)
 
         if not mongo_url:
+            logger.warning("No MongoDB URL provided for new deployment %s", name)
             return await message.reply_text(
                 "A MongoDB connection is required. Add MANAGER_DEFAULT_MONGO_URL or pass the value as the fourth argument.",
                 quote=True,
@@ -318,7 +362,9 @@ class BotManager:
 
         try:
             bot_user = await self.verify_bot_token(bot_token)
+            logger.info("Verified bot token for %s (%s)", name, bot_user.username or bot_user.first_name)
         except RPCError as exc:
+            logger.error("Bot token verification failed for %s: %s", name, exc)
             return await message.reply_text(f"Failed to verify bot token: {exc}", quote=True)
 
         deployment_dir = self.config.deployments_dir / name
@@ -347,10 +393,11 @@ class BotManager:
             path=str(deployment_dir.relative_to(ROOT)),
         )
 
-        started = self.start_process(deployment)
+        started, error = self.start_process(deployment)
         if started:
             deployment.started_at = datetime.utcnow().isoformat() + "Z"
             self.store.add(deployment)
+            logger.info("Created and started deployment %s pid=%s", name, deployment.pid)
             await message.reply_text(
                 f"Deployment <b>{name}</b> created and started.\n"
                 f"Bot: <code>{deployment.username}</code>\n"
@@ -358,12 +405,14 @@ class BotManager:
                 quote=True,
             )
         else:
+            logger.error("Deployment %s creation failed to start: %s", name, error)
             await message.reply_text(
-                f"Deployment <b>{name}</b> created, but failed to start.",
+                f"Deployment <b>{name}</b> created, but failed to start: {error}",
                 quote=True,
             )
 
     async def verify_bot_token(self, bot_token: str):
+        logger.info("Verifying bot token with temporary client.")
         temp = Client(
             name="verify-bot",
             api_id=self.config.api_id,
@@ -372,11 +421,49 @@ class BotManager:
         )
         await temp.start()
         try:
-            return await temp.get_me()
+            bot = await temp.get_me()
+            logger.info("Bot token verified for %s", bot.username or bot.first_name)
+            return bot
         finally:
             await temp.stop()
 
-    def start_process(self, deployment: DeploymentMeta) -> bool:
+    def _prepare_child(self) -> None:
+        os.setsid()
+        try:
+            PR_SET_PDEATHSIG = 1
+            libc = ctypes.CDLL("libc.so.6")
+            libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+        except Exception as exc:
+            logger.debug("Unable to set parent death signal for child process: %s", exc)
+
+    def _notify_owner(self, text: str) -> None:
+        if not hasattr(self.app, "loop"):
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self.app.send_message(self.config.owner_id, text), self.app.loop)
+        except Exception as exc:
+            logger.warning("Could not send owner notification: %s", exc)
+
+    def _monitor_loop(self) -> None:
+        logger.info("Deployment watcher started with interval %s seconds.", self.monitor_interval)
+        while not self.shutdown_event.wait(self.monitor_interval):
+            for deployment in list(self.store.list().values()):
+                if deployment.pid and not deployment.is_running:
+                    logger.warning("Deployment %s exited unexpectedly (pid=%s); attempting restart.", deployment.name, deployment.pid)
+                    restarted, error = self.start_process(deployment)
+                    if restarted:
+                        deployment.started_at = datetime.utcnow().isoformat() + "Z"
+                        self.store.update(deployment)
+                        self._notify_owner(
+                            f"Deployment <b>{deployment.name}</b> restarted automatically after an unexpected exit."
+                        )
+                    else:
+                        logger.error("Automatic restart failed for %s: %s", deployment.name, error)
+                        self._notify_owner(
+                            f"⚠️ Deployment <b>{deployment.name}</b> failed to restart automatically: {error}"
+                        )
+
+    def start_process(self, deployment: DeploymentMeta) -> tuple[bool, Optional[str]]:
         env = os.environ.copy()
         deployment_env = self.load_deployment_env(deployment.deployment_path / ".env")
         env.update(deployment_env)
@@ -384,32 +471,59 @@ class BotManager:
         env["PYTHONPATH"] = str(self.config.template_path)
 
         log_file = deployment.deployment_path / "run.log"
-        process = subprocess.Popen(
-            [sys.executable, "-m", "anony"],
-            cwd=self.config.template_path,
-            env=env,
-            stdout=log_file.open("a", encoding="utf-8"),
-            stderr=subprocess.STDOUT,
-        )
-        deployment.pid = process.pid
-        return deployment.pid is not None
-
-    def stop_process(self, deployment: DeploymentMeta) -> bool:
-        if not deployment.pid:
-            return False
+        logger.info("Starting deployment %s at %s", deployment.name, deployment.deployment_path)
         try:
-            process = psutil.Process(deployment.pid)
-            process.terminate()
-            process.wait(timeout=10)
+            process = subprocess.Popen(
+                [sys.executable, "-m", "anony"],
+                cwd=self.config.template_path,
+                env=env,
+                stdout=log_file.open("a", encoding="utf-8"),
+                stderr=subprocess.STDOUT,
+                preexec_fn=self._prepare_child,
+            )
+            deployment.pid = process.pid
+            self.processes[deployment.name] = process
+            logger.info("Deployment %s started with pid=%s", deployment.name, deployment.pid)
+            return True, None
+        except Exception as exc:
+            error_text = str(exc)
+            logger.error("Failed to start deployment %s: %s", deployment.name, error_text)
+            return False, error_text
+
+    def stop_process(self, deployment: DeploymentMeta) -> tuple[bool, Optional[str]]:
+        if not deployment.pid:
+            logger.warning("Deployment %s has no pid to stop.", deployment.name)
+            return False, "No pid found for deployment."
+        logger.info("Stopping deployment %s pid=%s", deployment.name, deployment.pid)
+        process = self.processes.get(deployment.name)
+        try:
+            if process and process.poll() is None:
+                process.terminate()
+            else:
+                os.killpg(os.getpgid(deployment.pid), signal.SIGTERM)
+        except Exception as exc:
+            logger.warning("Failed graceful terminate for %s pid=%s: %s", deployment.name, deployment.pid, exc)
+        try:
+            if process:
+                process.wait(timeout=10)
+            else:
+                psutil.Process(deployment.pid).wait(timeout=10)
+            logger.info("Deployment %s stopped.", deployment.name)
             deployment.pid = None
-            return True
-        except (psutil.NoSuchProcess, psutil.TimeoutExpired, psutil.AccessDenied):
+            self.processes.pop(deployment.name, None)
+            return True, None
+        except (psutil.NoSuchProcess, subprocess.TimeoutExpired, subprocess.TimeoutExpired, psutil.AccessDenied) as exc:
+            logger.warning("Graceful stop failed for %s pid=%s: %s", deployment.name, deployment.pid, exc)
             try:
-                process.kill()
-            except Exception:
-                pass
+                if process:
+                    process.kill()
+                else:
+                    os.killpg(os.getpgid(deployment.pid), signal.SIGKILL)
+            except Exception as exc2:
+                logger.error("Failed to kill deployment %s pid=%s: %s", deployment.name, deployment.pid, exc2)
             deployment.pid = None
-            return False
+            self.processes.pop(deployment.name, None)
+            return False, str(exc)
 
     def load_deployment_env(self, path: Path) -> Dict[str, str]:
         env = {}
@@ -426,7 +540,30 @@ class BotManager:
 
     def run(self) -> None:
         logger.info("Starting manager bot.")
-        self.app.run()
+        signal.signal(signal.SIGINT, self._shutdown_handler)
+        signal.signal(signal.SIGTERM, self._shutdown_handler)
+        self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.monitor_thread.start()
+        try:
+            self.app.run()
+        finally:
+            self.shutdown_event.set()
+            if self.monitor_thread.is_alive():
+                self.monitor_thread.join(timeout=2)
+
+    def _shutdown_handler(self, signum, frame):
+        logger.info("Manager received signal %s, stopping deployments...", signum)
+        self.shutdown_event.set()
+        self.stop_all()
+        logger.info("Exiting manager.")
+        sys.exit(0)
+
+    def stop_all(self) -> None:
+        logger.info("Stopping all managed deployments.")
+        for name, deployment in list(self.store.list().items()):
+            if deployment.is_running:
+                self.stop_process(deployment)
+                self.store.update(deployment)
 
 
 def main() -> None:
