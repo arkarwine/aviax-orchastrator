@@ -209,6 +209,7 @@ class BotManager:
         self.shutdown_event = threading.Event()
         self.monitor_interval = int(os.getenv("MANAGER_MONITOR_INTERVAL", "20"))
         self.processes: Dict[str, subprocess.Popen] = {}
+        self.failed_restarts: set[str] = set()
         self.app = Client(
             name="deploy-manager",
             api_id=self.config.api_id,
@@ -444,24 +445,47 @@ class BotManager:
         except Exception as exc:
             logger.warning("Could not send owner notification: %s", exc)
 
+    def _send_deployment_log(self, deployment: DeploymentMeta) -> None:
+        log_path = deployment.deployment_path / "run.log"
+        if not log_path.exists():
+            self._notify_owner(
+                f"⚠️ Log file for deployment <b>{deployment.name}</b> was not found."
+            )
+            return
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.app.send_document(
+                    self.config.owner_id,
+                    str(log_path),
+                    caption=f"Deployment <b>{deployment.name}</b> error log",
+                ),
+                self.app.loop,
+            )
+        except Exception as exc:
+            logger.warning("Could not send deployment log for %s: %s", deployment.name, exc)
+            self._notify_owner(
+                f"⚠️ Failed to send deployment log for <b>{deployment.name}</b>: {exc}"
+            )
+
     def _monitor_loop(self) -> None:
         logger.info("Deployment watcher started with interval %s seconds.", self.monitor_interval)
         while not self.shutdown_event.wait(self.monitor_interval):
             for deployment in list(self.store.list().values()):
                 if deployment.pid and not deployment.is_running:
-                    logger.warning("Deployment %s exited unexpectedly (pid=%s); attempting restart.", deployment.name, deployment.pid)
-                    restarted, error = self.start_process(deployment)
-                    if restarted:
-                        deployment.started_at = datetime.utcnow().isoformat() + "Z"
-                        self.store.update(deployment)
-                        self._notify_owner(
-                            f"Deployment <b>{deployment.name}</b> restarted automatically after an unexpected exit."
-                        )
-                    else:
-                        logger.error("Automatic restart failed for %s: %s", deployment.name, error)
-                        self._notify_owner(
-                            f"⚠️ Deployment <b>{deployment.name}</b> failed to restart automatically: {error}"
-                        )
+                    if deployment.name in self.failed_restarts:
+                        continue
+
+                    logger.warning(
+                        "Deployment %s exited unexpectedly (pid=%s); sending logs instead of restarting.",
+                        deployment.name,
+                        deployment.pid,
+                    )
+                    self.failed_restarts.add(deployment.name)
+                    self._notify_owner(
+                        f"⚠️ Deployment <b>{deployment.name}</b> exited unexpectedly and will not be auto-restarted. Sending logs now."
+                    )
+                    self._send_deployment_log(deployment)
 
     def start_process(self, deployment: DeploymentMeta) -> tuple[bool, Optional[str]]:
         env = os.environ.copy()
@@ -483,6 +507,7 @@ class BotManager:
             )
             deployment.pid = process.pid
             self.processes[deployment.name] = process
+            self.failed_restarts.discard(deployment.name)
             logger.info("Deployment %s started with pid=%s", deployment.name, deployment.pid)
             return True, None
         except Exception as exc:
