@@ -4,6 +4,7 @@
 
 
 import os
+from pathlib import Path
 import aiohttp
 from PIL import (Image, ImageDraw, ImageEnhance,
                  ImageFilter, ImageFont, ImageOps)
