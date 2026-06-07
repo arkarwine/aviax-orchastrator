@@ -1,4 +1,5 @@
 from os import getenv
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,6 +23,7 @@ class Config:
         self.SESSION1 = getenv("SESSION", None)
         self.SESSION2 = getenv("SESSION2", None)
         self.SESSION3 = getenv("SESSION3", None)
+        self.SESSION_PATH = getenv("SESSION_PATH", None)
 
         self.SUPPORT_CHANNEL = getenv("SUPPORT_CHANNEL", "https://t.me/fallenx")
         self.SUPPORT_CHAT = getenv("SUPPORT_CHAT", "https://t.me/DevilsHeavenMF")

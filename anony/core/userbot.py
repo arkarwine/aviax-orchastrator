@@ -3,6 +3,8 @@
 # This file is part of AnonXMusic
 
 
+from pathlib import Path
+
 from pyrogram import Client
 
 from anony import config, logger
@@ -21,11 +23,15 @@ class Userbot(Client):
         for key, string_key in clients.items():
             name = f"AnonyUB{key[-1]}"
             session = getattr(config, string_key)
+            session_name = name
+            if config.SESSION_PATH:
+                session_dir = Path(config.SESSION_PATH)
+                session_name = str(session_dir / name)
             setattr(
                 self,
                 key,
                 Client(
-                    name=name,
+                    name=session_name,
                     api_id=config.API_ID,
                     api_hash=config.API_HASH,
                     session_string=session,

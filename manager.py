@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -176,6 +176,7 @@ def env_from_template(**values: str) -> Dict[str, str]:
         "LOGGER_ID": str(values["logger_id"]),
         "OWNER_ID": str(values["owner_id"]),
         "SESSION": values["session"],
+        "SESSION_PATH": values["session_path"],
         "NAME": values["name"],
         "AUTO_LEAVE": "False",
         "AUTO_END": "False",
@@ -197,7 +198,7 @@ def handler_errors(func):
             logger.exception("Handler %s failed: %s", func.__name__, exc)
             await message.reply_text(
                 "⚠️ An internal error occurred while processing your request. Check the manager logs for details.",
-                quote=True,
+                reply_to_message_id=message.message_id,
             )
     return wrapper
 
@@ -231,7 +232,7 @@ class BotManager:
         await message.reply_text(
             "<b>Music Bot Deployment Manager</b>\n"
             "Use /help to see available commands.",
-            quote=True,
+            reply_to_message_id=message.message_id,
         )
 
     @handler_errors
@@ -243,13 +244,13 @@ class BotManager:
             "/status &lt;name&gt; - Show deployment status.\n"
             "/deploy &lt;name&gt; - Start a stopped deployment.\n"
             "/stop &lt;name&gt; - Stop a running deployment.\n",
-            quote=True,
+            reply_to_message_id=message.message_id,
         )
 
     @handler_errors
     async def list_bots(self, client: Client, message: Message) -> None:
         if not self.store.list():
-            return await message.reply_text("No deployments found.", quote=True)
+            return await message.reply_text("No deployments found.", reply_to_message_id=message.message_id)
 
         lines = ["<b>Deployments</b>"]
         for name, deployment in self.store.list().items():
@@ -257,18 +258,18 @@ class BotManager:
             lines.append(
                 f"<b>{deployment.username}</b> ({name}) — <code>{status}</code>"
             )
-        await message.reply_text("\n".join(lines), quote=True)
+        await message.reply_text("\n".join(lines), reply_to_message_id=message.message_id)
 
     @handler_errors
     async def status(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            return await message.reply_text("Usage: /status &lt;name&gt;", quote=True)
+            return await message.reply_text("Usage: /status &lt;name&gt;", reply_to_message_id=message.message_id)
 
         name = normalize_name(args[1])
         deployment = self.store.get(name)
         if not deployment:
-            return await message.reply_text(f"Deployment <b>{name}</b> not found.", quote=True)
+            return await message.reply_text(f"Deployment <b>{name}</b> not found.", reply_to_message_id=message.message_id)
 
         state = "running" if deployment.is_running else "stopped"
         text = (
@@ -281,57 +282,57 @@ class BotManager:
             f"Started: {deployment.started_at or 'never'}\n"
             f"Path: <code>{deployment.deployment_path}</code>"
         )
-        await message.reply_text(text, quote=True)
+        await message.reply_text(text, reply_to_message_id=message.message_id)
 
     @handler_errors
     async def deploy(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            return await message.reply_text("Usage: /deploy &lt;name&gt;", quote=True)
+            return await message.reply_text("Usage: /deploy &lt;name&gt;", reply_to_message_id=message.message_id)
 
         name = normalize_name(args[1])
         deployment = self.store.get(name)
         if not deployment:
-            return await message.reply_text(f"Deployment <b>{name}</b> not found.", quote=True)
+            return await message.reply_text(f"Deployment <b>{name}</b> not found.", reply_to_message_id=message.message_id)
 
         if deployment.is_running:
-            return await message.reply_text(f"Deployment <b>{name}</b> is already running.", quote=True)
+            return await message.reply_text(f"Deployment <b>{name}</b> is already running.", reply_to_message_id=message.message_id)
 
-        await message.reply_text(f"Starting deployment <b>{name}</b>...", quote=True)
+        await message.reply_text(f"Starting deployment <b>{name}</b>...", reply_to_message_id=message.message_id)
         started, error = self.start_process(deployment)
         if started:
             self.store.update(deployment)
-            await message.reply_text(f"Deployment <b>{name}</b> started.", quote=True)
+            await message.reply_text(f"Deployment <b>{name}</b> started.", reply_to_message_id=message.message_id)
         else:
             logger.error("Failed to start deployment %s: %s", name, error)
             await message.reply_text(
                 f"Failed to start deployment <b>{name}</b>: {error}",
-                quote=True,
+                reply_to_message_id=message.message_id,
             )
 
     @handler_errors
     async def stop(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            return await message.reply_text("Usage: /stop &lt;name&gt;", quote=True)
+            return await message.reply_text("Usage: /stop &lt;name&gt;", reply_to_message_id=message.message_id)
 
         name = normalize_name(args[1])
         deployment = self.store.get(name)
         if not deployment:
-            return await message.reply_text(f"Deployment <b>{name}</b> not found.", quote=True)
+            return await message.reply_text(f"Deployment <b>{name}</b> not found.", reply_to_message_id=message.message_id)
 
         if not deployment.is_running:
-            return await message.reply_text(f"Deployment <b>{name}</b> is not running.", quote=True)
+            return await message.reply_text(f"Deployment <b>{name}</b> is not running.", reply_to_message_id=message.message_id)
 
         stopped, error = self.stop_process(deployment)
         if stopped:
             self.store.update(deployment)
-            await message.reply_text(f"Deployment <b>{name}</b> stopped.", quote=True)
+            await message.reply_text(f"Deployment <b>{name}</b> stopped.", reply_to_message_id=message.message_id)
         else:
             logger.error("Failed to stop deployment %s: %s", name, error)
             await message.reply_text(
                 f"Failed to stop deployment <b>{name}</b>: {error}",
-                quote=True,
+                reply_to_message_id=message.message_id,
             )
 
     @handler_errors
@@ -340,7 +341,7 @@ class BotManager:
         if len(args) < 4:
             return await message.reply_text(
                 "Usage: /newbot &lt;name&gt; &lt;bot_token&gt; &lt;session_string&gt; [mongo_url]",
-                quote=True,
+                reply_to_message_id=message.message_id,
             )
 
         name = normalize_name(args[1])
@@ -353,26 +354,25 @@ class BotManager:
             logger.warning("No MongoDB URL provided for new deployment %s", name)
             return await message.reply_text(
                 "A MongoDB connection is required. Add MANAGER_DEFAULT_MONGO_URL or pass the value as the fourth argument.",
-                quote=True,
+                reply_to_message_id=message.message_id,
             )
 
         if name in self.store.list():
-            return await message.reply_text(f"A deployment named <b>{name}</b> already exists.", quote=True)
+            return await message.reply_text(f"A deployment named <b>{name}</b> already exists.", reply_to_message_id=message.message_id)
 
-        await message.reply_text(f"Creating deployment <b>{name}</b>...", quote=True)
+        await message.reply_text(f"Creating deployment <b>{name}</b>...", reply_to_message_id=message.message_id)
 
         try:
             bot_user = await self.verify_bot_token(bot_token)
             logger.info("Verified bot token for %s (%s)", name, bot_user.username or bot_user.first_name)
         except RPCError as exc:
             logger.error("Bot token verification failed for %s: %s", name, exc)
-            return await message.reply_text(f"Failed to verify bot token: {exc}", quote=True)
+            return await message.reply_text(f"Failed to verify bot token: {exc}", reply_to_message_id=message.message_id)
 
         deployment_dir = self.config.deployments_dir / name
         deployment_dir.mkdir(parents=True, exist_ok=False)
 
         env_path = deployment_dir / ".env"
-        session_path = deployment_dir / ".session"
         env_vars = env_from_template(
             api_id=self.config.api_id,
             api_hash=self.config.api_hash,
@@ -381,37 +381,37 @@ class BotManager:
             logger_id=self.config.default_logger_id or self.config.owner_id,
             owner_id=self.config.owner_id,
             session=session_string,
+            session_path=str(deployment_dir),
             name=name,
             api_url=os.getenv("DEFAULT_API_URL", ""),
             video_api_url=os.getenv("DEFAULT_VIDEO_API_URL", ""),
         )
         env_path.write_text("\n".join(f"{key}={value}" for key, value in env_vars.items()), encoding="utf-8")
-        session_path.write_text(session_string, encoding="utf-8")
 
         deployment = DeploymentMeta(
             name=name,
             bot_id=bot_user.id,
             username=f"@{bot_user.username}" if bot_user.username else bot_user.first_name,
-            created_at=datetime.utcnow().isoformat() + "Z",
+            created_at=datetime.now(timezone.utc).isoformat(),
             path=str(deployment_dir.relative_to(ROOT)),
         )
 
         started, error = self.start_process(deployment)
         if started:
-            deployment.started_at = datetime.utcnow().isoformat() + "Z"
+            deployment.started_at = datetime.now(timezone.utc).isoformat()
             self.store.add(deployment)
             logger.info("Created and started deployment %s pid=%s", name, deployment.pid)
             await message.reply_text(
                 f"Deployment <b>{name}</b> created and started.\n"
                 f"Bot: <code>{deployment.username}</code>\n"
                 f"Path: <code>{deployment.deployment_path}</code>",
-                quote=True,
+                reply_to_message_id=message.message_id,
             )
         else:
             logger.error("Deployment %s creation failed to start: %s", name, error)
             await message.reply_text(
                 f"Deployment <b>{name}</b> created, but failed to start: {error}",
-                quote=True,
+                reply_to_message_id=message.message_id,
             )
 
     async def verify_bot_token(self, bot_token: str):
@@ -502,7 +502,7 @@ class BotManager:
         try:
             process = subprocess.Popen(
                 [sys.executable, "-m", "anony"],
-                cwd=self.config.template_path,
+                cwd=deployment.deployment_path,
                 env=env,
                 stdout=log_file.open("a", encoding="utf-8"),
                 stderr=subprocess.STDOUT,
