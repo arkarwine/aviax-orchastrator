@@ -135,6 +135,7 @@ async def _help(_, query: types.CallbackQuery):
             text=f"❔ {query.lang['help_menu']}",
             reply_markup=await buttons.help_markup(
                 query.lang,
+                user_id=query.from_user.id,
             ),
         )
     elif data[1] == "close":
@@ -144,11 +145,15 @@ async def _help(_, query: types.CallbackQuery):
         except Exception:
             return
 
+    if data[1] == "sudo" and query.from_user.id != app.owner and query.from_user.id not in app.sudoers:
+        return await query.answer("Sudo commands are only visible to the owner and sudo users.", show_alert=True)
+
     await query.edit_message_text(
         text=f"📘 {query.lang[f'help_{data[1]}']}",
         reply_markup=await buttons.help_markup(
             query.lang,
             True,
+            user_id=query.from_user.id,
         ),
     )
 

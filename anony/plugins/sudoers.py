@@ -9,9 +9,12 @@ from anony import app, db, lang
 from anony.helpers import utils
 
 
-@app.on_message(filters.command(["addsudo", "delsudo", "rmsudo"]) & filters.user(app.owner))
+@app.on_message(filters.command(["addsudo", "delsudo", "rmsudo"]) & ~app.bl_users)
 @lang.language()
 async def _sudo(_, m: types.Message):
+    if m.from_user.id != app.owner:
+        return await m.reply_text("Only the owner can manage sudo users.")
+
     user = await utils.extract_user(m)
     if not user:
         return await m.reply_text(m.lang["user_not_found"])
@@ -34,9 +37,12 @@ async def _sudo(_, m: types.Message):
 
 o_mention = None
 
-@app.on_message(filters.command(["listsudo", "sudolist"]))
+@app.on_message(filters.command(["listsudo", "sudolist"]) & ~app.bl_users)
 @lang.language()
 async def _listsudo(_, m: types.Message):
+    if m.from_user.id != app.owner and m.from_user.id not in app.sudoers:
+        return await m.reply_text("Sudo commands are only available to the owner and sudo users.")
+
     global o_mention
     sent = await m.reply_text(m.lang["sudo_fetching"])
 

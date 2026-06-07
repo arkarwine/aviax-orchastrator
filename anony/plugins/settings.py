@@ -8,7 +8,7 @@ from pyrogram import enums, filters, types
 from anony import app, config, db, lang
 
 
-@app.on_message(filters.command(["config", "getconfig", "setconfig"]) & ~app.bl_users)
+@app.on_message(filters.command(["config", "botconfig"]) & ~app.bl_users)
 @lang.language()
 async def _settings(_, m: types.Message):
     """Show runtime setting help or update a setting when key/value are provided."""
@@ -130,10 +130,10 @@ async def _get_setting(_, m: types.Message):
     await m.reply_text(f"<code>{key}</code> = <code>{value}</code>\n(override)")
 
 
-@app.on_message(filters.command(["setconfig"]) & ~app.bl_users)
+@app.on_message(filters.command(["resetconfig"]) & ~app.bl_users)
 @lang.language()
 async def _reset_setting(_, m: types.Message):
-    """Reset a setting to its default (environment) value. Usage: /setconfig KEY"""
+    """Reset a setting to its default (environment) value. Usage: /resetconfig KEY"""
     if m.chat.type != enums.ChatType.PRIVATE:
         return await m.reply_text(
             "This command works in private chats only, because it resets live bot settings."
@@ -144,7 +144,7 @@ async def _reset_setting(_, m: types.Message):
         )
 
     if len(m.command) < 2:
-        return await m.reply_text("Usage: /setconfig &lt;key&gt;")
+        return await m.reply_text("Usage: /resetconfig &lt;key&gt;")
     
     key = m.command[1].upper()
     

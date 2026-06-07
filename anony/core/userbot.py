@@ -19,6 +19,9 @@ class Userbot(Client):
         Each client is assigned a unique name based on the key in the `clients` dictionary.
         """
         self.clients = []
+        self.reload_from_config()
+
+    def reload_from_config(self) -> None:
         clients = {"one": "SESSION1", "two": "SESSION2", "three": "SESSION3"}
         for key, string_key in clients.items():
             name = f"AnonyUB{key[-1]}"
@@ -30,13 +33,16 @@ class Userbot(Client):
             setattr(
                 self,
                 key,
-                Client(
-                    name=session_name,
-                    api_id=config.API_ID,
-                    api_hash=config.API_HASH,
-                    session_string=session,
-                ),
+                self.build_client(session_name, session),
             )
+
+    def build_client(self, session_name: str, session: str | None = None) -> Client:
+        return Client(
+            name=session_name,
+            api_id=config.API_ID,
+            api_hash=config.API_HASH,
+            session_string=session,
+        )
 
     async def boot_client(self, num: int, ub: Client):
         """
@@ -67,10 +73,30 @@ class Userbot(Client):
 
         logger.info(f"Assistant {num} started as @{client.username}")
 
+    async def add_session(self, session: str) -> int:
+        for num, attr in enumerate(("one", "two", "three"), start=1):
+            key = f"SESSION{num}"
+            if getattr(config, key):
+                continue
+
+            config.apply_runtime_config({key: session})
+            session_name = f"AnonyUB{attr[-1]}"
+            if config.SESSION_PATH:
+                session_name = str(Path(config.SESSION_PATH) / session_name)
+            client = self.build_client(session_name, session)
+            setattr(self, attr, client)
+            await self.boot_client(num, client)
+            return num
+
+        raise ValueError("All assistant session slots are already configured.")
+
     async def boot(self):
         """
         Asynchronously starts the assistants.
         """
+        if not config.LOGGER_ID:
+            logger.info("Log group is not configured yet; skipping assistant startup.")
+            return
         if config.SESSION1:
             await self.boot_client(1, self.one)
         if config.SESSION2:

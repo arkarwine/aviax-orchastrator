@@ -27,6 +27,11 @@ async def main():
     runtime_settings = await db.get_all_config()
     if runtime_settings:
         config.apply_runtime_config(runtime_settings)
+        app.owner = config.OWNER_ID
+        app.logger = config.LOGGER_ID
+        if app.owner:
+            app.sudoers.add(app.owner)
+        userbot.reload_from_config()
 
     await app.boot()
     await userbot.boot()

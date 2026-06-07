@@ -92,6 +92,8 @@ class Utilities:
         title: str,
         duration: str,
     ) -> None:
+        if not app.logger:
+            return
         if m.chat.id == app.logger:
             return
         _text = m.lang["play_log"].format(
@@ -107,6 +109,8 @@ class Utilities:
         await app.send_message(chat_id=app.logger, text=_text)
 
     async def send_log(self, m: types.Message, chat: bool = False) -> None:
+        if not app.logger:
+            return
         if chat:
             user = m.from_user
             return await app.send_message(

@@ -176,9 +176,6 @@ def env_from_template(**values: str) -> Dict[str, str]:
         "API_HASH": values["api_hash"],
         "BOT_TOKEN": values["bot_token"],
         "MONGO_URL": values["mongo_url"],
-        "LOGGER_ID": str(values["logger_id"]),
-        "OWNER_ID": str(values["owner_id"]),
-        "SESSION": values["session"],
         "SESSION_PATH": values["session_path"],
         "NAME": values["name"],
         "AUTO_LEAVE": "False",
@@ -247,7 +244,7 @@ class BotManager:
     async def help(self, client: Client, message: Message) -> None:
         await message.reply_text(
             "<b>Manager Commands</b>\n"
-            "/newbot &lt;name&gt; &lt;bot_token&gt; &lt;session_string&gt; [mongo_url] - Create and start a new deployment.\n"
+            "/newbot &lt;name&gt; &lt;bot_token&gt; - Create and start a new deployment.\n"
             "/list - Show all deployments.\n"
             "/status &lt;name&gt; - Show deployment status.\n"
             "/deploy &lt;name&gt; - Start a stopped deployment.\n"
@@ -359,23 +356,22 @@ class BotManager:
 
     @handler_errors
     async def newbot(self, client: Client, message: Message) -> None:
-        args = message.text.split(maxsplit=4)
-        if len(args) < 4:
+        args = message.text.split(maxsplit=2)
+        if len(args) < 3:
             return await message.reply_text(
-                "Usage: /newbot &lt;name&gt; &lt;bot_token&gt; &lt;session_string&gt; [mongo_url]",
+                "Usage: /newbot &lt;name&gt; &lt;bot_token&gt;",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
         name = normalize_name(args[1])
         bot_token = args[2].strip()
-        session_string = args[3].strip()
-        mongo_url = args[4].strip() if len(args) > 4 else self.config.default_mongo_url
+        mongo_url = self.config.default_mongo_url
         logger.info("Received newbot request for %s", name)
 
         if not mongo_url:
             logger.warning("No MongoDB URL provided for new deployment %s", name)
             return await message.reply_text(
-                "A MongoDB connection is required. Add MANAGER_DEFAULT_MONGO_URL or pass the value as the fourth argument.",
+                "A MongoDB connection is required. Add MANAGER_DEFAULT_MONGO_URL to manager.env.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
@@ -404,9 +400,6 @@ class BotManager:
             api_hash=self.config.api_hash,
             bot_token=bot_token,
             mongo_url=mongo_url,
-            logger_id=self.config.default_logger_id or self.config.owner_id,
-            owner_id=self.config.owner_id,
-            session=session_string,
             session_path=str(deployment_dir),
             name=name,
             api_url=os.getenv("DEFAULT_API_URL", ""),

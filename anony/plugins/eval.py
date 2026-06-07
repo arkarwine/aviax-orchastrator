@@ -18,10 +18,13 @@ from anony import anon, app, config, db, lang, userbot
 from anony.helpers import format_exception, meval
 
 
-@app.on_message(filters.command(["eval", "exec"]) & filters.user(app.owner))
-@app.on_edited_message(filters.command(["eval", "exec"]) & filters.user(app.owner))
+@app.on_message(filters.command(["eval", "exec"]) & ~app.bl_users)
+@app.on_edited_message(filters.command(["eval", "exec"]) & ~app.bl_users)
 @lang.language()
 async def eval_handler(_, message: types.Message):
+    if message.from_user.id != app.owner:
+        return await message.reply_text("Only the owner can use this command.")
+
     if len(message.command) < 2:
         return await message.reply_text(message.lang["eval_inp"])
 

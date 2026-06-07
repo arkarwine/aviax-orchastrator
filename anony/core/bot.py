@@ -37,6 +37,14 @@ class Bot(pyrogram.Client):
         self.username = self.me.username
         self.mention = self.me.mention
 
+        if self.owner:
+            self.sudoers.add(self.owner)
+
+        if not self.logger:
+            logger.info("Log group is not configured yet; skipping log group check.")
+            logger.info(f"Bot started as @{self.username}")
+            return
+
         try:
             await self.send_message(self.logger, "Bot Started")
             get = await self.get_chat_member(self.logger, self.id)

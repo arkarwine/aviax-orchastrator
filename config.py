@@ -69,7 +69,7 @@ class Config:
     def check(self):
         missing = [
             var
-            for var in ["API_ID", "API_HASH", "BOT_TOKEN", "MONGO_URL", "LOGGER_ID", "OWNER_ID", "SESSION1", "NAME"]
+            for var in ["API_ID", "API_HASH", "BOT_TOKEN", "MONGO_URL", "NAME"]
             if not getattr(self, var)
         ]
         if missing:
@@ -90,6 +90,8 @@ class Config:
                 self.__dict__[key] = bool(value)
             elif key == "API_KEY":
                 self.API_KEY = value if value else None
+            elif key in {"LOGGER_ID", "OWNER_ID"}:
+                self.__dict__[key] = int(value or 0)
             elif hasattr(self, key):
                 setattr(self, key, value)
 

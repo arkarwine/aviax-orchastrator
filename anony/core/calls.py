@@ -178,6 +178,8 @@ class TgCall(PyTgCalls):
 
 
     async def ping(self) -> float:
+        if not self.clients:
+            return 0.0
         pings = [client.ping for client in self.clients]
         return round(sum(pings) / len(pings), 2)
 
@@ -200,8 +202,12 @@ class TgCall(PyTgCalls):
     async def boot(self) -> None:
         PyTgCallsSession.notice_displayed = True
         for ub in userbot.clients:
-            client = PyTgCalls(ub, cache_duration=100)
-            await client.start()
-            self.clients.append(client)
-            await self.decorators(client)
+            await self.add_client(ub)
         logger.info("PyTgCalls client(s) started.")
+
+    async def add_client(self, ub) -> None:
+        PyTgCallsSession.notice_displayed = True
+        client = PyTgCalls(ub, cache_duration=100)
+        await client.start()
+        self.clients.append(client)
+        await self.decorators(client)

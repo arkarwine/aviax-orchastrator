@@ -5,7 +5,7 @@
 
 from pyrogram import types
 
-from anony import app, config, db, lang
+from anony import app, config, lang
 from anony.core.lang import lang_codes
 
 
@@ -50,6 +50,7 @@ class Inline:
         self,
         _lang: dict,
         back: bool = False,
+        user_id: int | None = None,
     ) -> types.InlineKeyboardMarkup:
         if back:
             rows = [
@@ -84,6 +85,7 @@ class Inline:
             buttons = [
                 self.ikb(text=f"{icons[cb]} {_lang[f'help_{i}']}", callback_data=f"help {cb}")
                 for i, cb in enumerate(cbs)
+                if cb != "sudo" or user_id == app.owner or (user_id is not None and user_id in app.sudoers)
             ]
             rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
 
