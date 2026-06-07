@@ -48,8 +48,9 @@ async def _logger(_, m: types.Message):
 async def _restart(_, m: types.Message):
     sent = await m.reply_text(m.lang["restarting"])
 
-    for directory in ["cache", "downloads"]:
-        shutil.rmtree(directory, ignore_errors=True)
+    shutil.rmtree("cache", ignore_errors=True)
+    if not os.getenv("DOWNLOADS_PATH"):
+        shutil.rmtree("downloads", ignore_errors=True)
 
     await sent.edit_text(m.lang["restarted"])
     asyncio.create_task(stop())

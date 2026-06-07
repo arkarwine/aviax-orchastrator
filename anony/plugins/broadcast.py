@@ -5,6 +5,7 @@
 
 import os
 import asyncio
+from pathlib import Path
 
 from pyrogram import errors, filters, types
 
@@ -72,13 +73,14 @@ async def _broadcast(_, message: types.Message):
 
     text = message.lang["gcast_end"].format(count, ucount)
     if failed:
-        with open("errors.txt", "w") as f:
-            f.write(failed)
+        temp_file = Path.cwd() / "cache" / "errors.txt"
+        temp_file.parent.mkdir(parents=True, exist_ok=True)
+        temp_file.write_text(failed, encoding="utf-8")
         await message.reply_document(
-            document="errors.txt",
+            document=str(temp_file),
             caption=text,
         )
-        os.remove("errors.txt")
+        temp_file.unlink(missing_ok=True)
     broadcasting = False
     await sent.edit_text(text)
 

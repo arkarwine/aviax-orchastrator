@@ -6,6 +6,7 @@
 import asyncio
 import os
 import time
+from pathlib import Path
 
 from pyrogram import types
 
@@ -87,7 +88,9 @@ class Telegram:
             )
 
         try:
-            file_path = f"downloads/{file_id}.{file_ext}"
+            downloads_dir = Path(config.DOWNLOADS_PATH) if config.DOWNLOADS_PATH else Path.cwd() / "downloads"
+            downloads_dir.mkdir(parents=True, exist_ok=True)
+            file_path = str(downloads_dir / f"{file_id}.{file_ext}")
             if not os.path.exists(file_path):
                 if file_id in self.active:
                     await sent.edit_text(sent.lang["dl_active"])

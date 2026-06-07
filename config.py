@@ -24,6 +24,8 @@ class Config:
         self.SESSION2 = getenv("SESSION2", None)
         self.SESSION3 = getenv("SESSION3", None)
         self.SESSION_PATH = getenv("SESSION_PATH", None)
+        downloads_path = getenv("DOWNLOADS_PATH", "")
+        self.DOWNLOADS_PATH = Path(downloads_path).resolve() if downloads_path else None
 
         self.SUPPORT_CHANNEL = getenv("SUPPORT_CHANNEL", "https://t.me/fallenx")
         self.SUPPORT_CHAT = getenv("SUPPORT_CHAT", "https://t.me/DevilsHeavenMF")

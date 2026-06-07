@@ -116,9 +116,11 @@ async def play_hndlr(
             return
 
     if not file.file_path:
-        fname = f"downloads/{file.id}.{'mp4' if video else 'webm'}"
-        if Path(fname).exists():
-            file.file_path = fname
+        downloads_dir = Path(config.DOWNLOADS_PATH) if config.DOWNLOADS_PATH else Path.cwd() / "downloads"
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        fname = downloads_dir / f"{file.id}.{'mp4' if video else 'webm'}"
+        if fname.exists():
+            file.file_path = str(fname)
         else:
             await sent.edit_text(m.lang["play_downloading"])
             file.file_path = await yt.download(file.id, video=video)

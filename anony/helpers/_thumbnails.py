@@ -41,12 +41,14 @@ class Thumbnail:
 
     async def generate(self, song: Track, size=(1280, 720)) -> str:
         try:
-            temp = f"cache/temp_{song.id}.jpg"
-            output = f"cache/{song.id}.png"
-            if os.path.exists(output):
-                return output
+            cache_dir = Path.cwd() / "cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            temp = cache_dir / f"temp_{song.id}.jpg"
+            output = cache_dir / f"{song.id}.png"
+            if output.exists():
+                return str(output)
 
-            await self.save_thumb(temp, song.thumbnail)
+            await self.save_thumb(str(temp), song.thumbnail)
             thumb = Image.open(temp).convert("RGBA").resize(
                 size, Image.Resampling.LANCZOS,
             )
@@ -77,8 +79,10 @@ class Thumbnail:
             draw.text((1185, 650), song.duration, font=self.font1, fill=self.fill)
 
             image.save(output)
-            try: os.remove(temp)
-            except Exception: pass
-            return output
+            try:
+                temp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return str(output)
         except Exception:
             config.DEFAULT_THUMB

@@ -4,6 +4,7 @@
 
 
 import os
+from pathlib import Path
 
 from pyrogram import filters, types
 
@@ -29,13 +30,14 @@ async def _activevc(_, m: types.Message):
     if len(text) < 4000:
         return await sent.edit_text(m.lang["vc_list"] + text)
 
-    with open("activevc.txt", "w") as f:
-        f.write(text)
-    f.close()
+    temp_file = Path.cwd() / "cache" / "activevc.txt"
+    temp_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_file.write_text(text, encoding="utf-8")
+
     await sent.edit_media(
         media=types.InputMediaDocument(
-            media="activevc.txt",
+            media=str(temp_file),
             caption=m.lang["vc_list"],
         )
     )
-    os.remove("activevc.txt")
+    temp_file.unlink(missing_ok=True)

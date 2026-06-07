@@ -4,9 +4,12 @@
 
 import re
 import asyncio
+from pathlib import Path
 
 import aiohttp
 import aiofiles
+
+from anony import config
 
 
 class NexGenApi:
@@ -43,15 +46,19 @@ class NexGenApi:
                 else:
                     file_name = vid_id + (".mp4" if video else ".mp3")
 
-                fname = f"downloads/{file_name}"
-                async with aiofiles.open(fname, "wb") as f:
+                downloads_dir = Path(config.DOWNLOADS_PATH) if config.DOWNLOADS_PATH else Path.cwd() / "downloads"
+                downloads_dir.mkdir(parents=True, exist_ok=True)
+                fname = downloads_dir / file_name
+                async with aiofiles.open(str(fname), "wb") as f:
                     async for chunk in resp.content.iter_chunked(self.chunk_limit):
                         if chunk: await f.write(chunk)
 
-                if video: self.v_cache[vid_id] = fname
-                else: self.dl_cache[vid_id] = fname
+                if video:
+                    self.v_cache[vid_id] = str(fname)
+                else:
+                    self.dl_cache[vid_id] = str(fname)
 
-                return fname
+                return str(fname)
         except Exception:
             pass
         return None

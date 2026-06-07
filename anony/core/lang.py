@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pyrogram import errors
 
-from anony import db, logger
+from anony import config, db, logger
 
 lang_codes = {
     "ar": "العربية",
@@ -35,7 +35,7 @@ class Language:
 
     def __init__(self):
         self.lang_codes = lang_codes
-        self.lang_dir = Path("anony/locales")
+        self.lang_dir = Path(__file__).resolve().parent.parent / "locales"
         self.languages = self.load_files()
 
     def load_files(self):
@@ -83,6 +83,8 @@ class Language:
                     return await chat.leave()
 
                 lang_code = await db.get_lang(chat.id)
+                if lang_code not in self.languages:
+                    lang_code = config.LANG_CODE if config.LANG_CODE in self.languages else next(iter(self.languages), "en")
                 lang_dict = self.languages[lang_code]
 
                 setattr(fallen, "lang", lang_dict)

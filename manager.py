@@ -187,6 +187,8 @@ def env_from_template(**values: str) -> Dict[str, str]:
     for key, default in ("API_URL", values.get("api_url")), ("VIDEO_API_URL", values.get("video_api_url")):
         if default:
             env[key] = default
+    if values.get("downloads_path"):
+        env["DOWNLOADS_PATH"] = values["downloads_path"]
     return env
 
 
@@ -373,6 +375,10 @@ class BotManager:
         deployment_dir.mkdir(parents=True, exist_ok=False)
 
         env_path = deployment_dir / ".env"
+        manager_downloads_path = os.getenv("MANAGER_DOWNLOADS_PATH", "")
+        if manager_downloads_path and not Path(manager_downloads_path).is_absolute():
+            manager_downloads_path = str((ROOT / manager_downloads_path).resolve())
+
         env_vars = env_from_template(
             api_id=self.config.api_id,
             api_hash=self.config.api_hash,
@@ -385,6 +391,7 @@ class BotManager:
             name=name,
             api_url=os.getenv("DEFAULT_API_URL", ""),
             video_api_url=os.getenv("DEFAULT_VIDEO_API_URL", ""),
+            downloads_path=manager_downloads_path,
         )
         env_path.write_text("\n".join(f"{key}={value}" for key, value in env_vars.items()), encoding="utf-8")
 
@@ -505,6 +512,11 @@ class BotManager:
         env = os.environ.copy()
         deployment_env = self.load_deployment_env(deployment.deployment_path / ".env")
         env.update(deployment_env)
+        manager_downloads_path = os.getenv("MANAGER_DOWNLOADS_PATH")
+        if manager_downloads_path:
+            if not Path(manager_downloads_path).is_absolute():
+                manager_downloads_path = str((ROOT / manager_downloads_path).resolve())
+            env["DOWNLOADS_PATH"] = manager_downloads_path
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONPATH"] = str(self.config.template_path)
 
