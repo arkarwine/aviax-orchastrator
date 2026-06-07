@@ -372,6 +372,7 @@ class BotManager:
         deployment_dir.mkdir(parents=True, exist_ok=False)
 
         env_path = deployment_dir / ".env"
+        session_path = deployment_dir / ".session"
         env_vars = env_from_template(
             api_id=self.config.api_id,
             api_hash=self.config.api_hash,
@@ -385,6 +386,7 @@ class BotManager:
             video_api_url=os.getenv("DEFAULT_VIDEO_API_URL", ""),
         )
         env_path.write_text("\n".join(f"{key}={value}" for key, value in env_vars.items()), encoding="utf-8")
+        session_path.write_text(session_string, encoding="utf-8")
 
         deployment = DeploymentMeta(
             name=name,
