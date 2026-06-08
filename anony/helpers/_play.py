@@ -70,7 +70,10 @@ def checkUB(play):
                             )
                         )
             except errors.ChatAdminRequired:
-                return await m.reply_text(m.lang["admin_required"])
+                return await m.reply_text(
+                    "🛡️ I need admin access to prepare the assistant.\n\n"
+                    "💡 Promote the bot as admin with invite-user permissions, then try /play again."
+                )
             except (errors.UserNotParticipant, errors.exceptions.bad_request_400.UserNotParticipant):
                 if m.chat.username:
                     invite_link = m.chat.username
@@ -84,13 +87,17 @@ def checkUB(play):
                         if not invite_link:
                             invite_link = await app.export_chat_invite_link(chat_id)
                     except errors.ChatAdminRequired:
-                        return await m.reply_text(m.lang["admin_required"])
-                    except Exception as ex:
                         return await m.reply_text(
-                            m.lang["play_invite_error"].format(type(ex).__name__)
+                            "🛡️ I need admin access to create an invite link for the assistant.\n\n"
+                            "💡 Promote the bot as admin with invite-user permissions, then try again."
+                        )
+                    except Exception:
+                        return await m.reply_text(
+                            "❌ I could not prepare an invite link for the assistant.\n\n"
+                            "💡 Create a public username or invite link for this group, then try /play again."
                         )
 
-                umm = await m.reply_text(m.lang["play_invite"].format(app.name))
+                umm = await m.reply_text("🤝 Inviting the assistant to this group...")
                 await asyncio.sleep(2)
                 try:
                     await client.join_chat(invite_link)
@@ -102,14 +109,16 @@ def checkUB(play):
                         await app.approve_chat_join_request(chat_id, client.id)
                     except errors.HideRequesterMissing:
                         pass
-                    except Exception as ex:
+                    except Exception:
                         return await umm.edit_text(
-                            m.lang["play_invite_error"].format(type(ex).__name__)
+                            "❌ The assistant's join request could not be approved.\n\n"
+                            "💡 Check the bot's admin permissions, then try /play again."
                         )
-                except Exception as ex:
-                    logger.error(f"Error joining chat - {chat_id}: {ex}")
+                except Exception:
+                    logger.exception("Assistant failed to join chat %s", chat_id)
                     return await umm.edit_text(
-                        m.lang["play_invite_error"].format(type(ex).__name__)
+                        "❌ The assistant could not join this group.\n\n"
+                        "💡 Check the invite link, remove any assistant ban, and try /play again."
                     )
 
                 await umm.delete()

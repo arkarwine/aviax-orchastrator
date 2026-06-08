@@ -4,13 +4,28 @@
 
 
 import asyncio
-import signal
 import importlib
+import signal
 from contextlib import suppress
 
-from anony import (anon, app, config, db, logger,
-                   stop, thumb, userbot, yt)
+from anony import anon, app, config, db, logger, stop, thumb, userbot, yt
 from anony.plugins import all_modules
+
+
+def deployment_runtime_settings(settings: dict) -> dict:
+    if not config.MANAGED_SETUP or not config.DEPLOYMENT_ID:
+        return settings
+
+    runtime_deployment_id = settings.get("DEPLOYMENT_ID")
+    if settings and runtime_deployment_id != config.DEPLOYMENT_ID:
+        logger.warning(
+            "Ignoring runtime config for mismatched deployment id: expected=%s got=%s",
+            config.DEPLOYMENT_ID,
+            runtime_deployment_id or "none",
+        )
+        return {}
+
+    return {key: value for key, value in settings.items() if key != "DEPLOYMENT_ID"}
 
 
 async def idle():
@@ -24,7 +39,8 @@ async def idle():
 
 async def main():
     await db.connect()
-    runtime_settings = await db.get_all_config()
+    runtime_settings = deployment_runtime_settings(await db.get_all_config())
+
     if runtime_settings:
         config.apply_runtime_config(runtime_settings)
         app.owner = config.OWNER_ID
@@ -44,7 +60,8 @@ async def main():
 
     if config.COOKIES_URL:
         await yt.save_cookies(config.COOKIES_URL)
-    if yt.api: await yt.api.get_session()
+    if yt.api:
+        await yt.api.get_session()
 
     sudoers = await db.get_sudoers()
     app.sudoers.update(sudoers)

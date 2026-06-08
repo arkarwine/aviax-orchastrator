@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 import asyncio
-import ctypes
 import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import threading
-import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -31,6 +30,8 @@ DEPLOYMENT_ENV_KEYS = {
     "BOT_TOKEN",
     "MONGO_URL",
     "DB_NAME",
+    "DEPLOYMENT_ID",
+    "MANAGED_SETUP",
     "NAME",
     "OWNER_ID",
     "LOGGER_ID",
@@ -68,7 +69,6 @@ class ManagerConfig:
     bot_token: str
     owner_id: int
     default_mongo_url: Optional[str]
-    default_logger_id: Optional[int]
     deployments_dir: Path
     template_path: Path
     api_key: Optional[str]
@@ -80,7 +80,6 @@ class ManagerConfig:
         bot_token = os.getenv("MANAGER_BOT_TOKEN", "")
         owner_id = int(os.getenv("MANAGER_OWNER_ID", "0"))
         default_mongo_url = os.getenv("MANAGER_DEFAULT_MONGO_URL")
-        default_logger_id = os.getenv("MANAGER_DEFAULT_LOGGER_ID")
         deployments_dir = Path(os.getenv("DEPLOYMENTS_DIR", "deployments")).resolve()
         template_path = Path(os.getenv("TEMPLATE_PATH", ".")).resolve()
         api_key = os.getenv("MANAGER_API_KEY")
@@ -104,7 +103,6 @@ class ManagerConfig:
             bot_token=bot_token,
             owner_id=owner_id,
             default_mongo_url=default_mongo_url,
-            default_logger_id=int(default_logger_id) if default_logger_id else None,
             deployments_dir=deployments_dir,
             template_path=template_path,
             api_key=api_key,
@@ -119,6 +117,7 @@ class DeploymentMeta:
     created_at: str
     path: str
     db_name: Optional[str] = None
+    deployment_id: Optional[str] = None
     pid: Optional[int] = None
     started_at: Optional[str] = None
 
@@ -186,6 +185,10 @@ class DeploymentStore:
         self.deployments[deployment.name] = deployment
         self.save()
 
+    def remove(self, name: str) -> None:
+        self.deployments.pop(name, None)
+        self.save()
+
     def get(self, name: str) -> Optional[DeploymentMeta]:
         return self.deployments.get(name)
 
@@ -205,6 +208,8 @@ def env_from_template(**values: str) -> Dict[str, str]:
         "BOT_TOKEN": values["bot_token"],
         "MONGO_URL": values["mongo_url"],
         "DB_NAME": values["db_name"],
+        "DEPLOYMENT_ID": values["deployment_id"],
+        "MANAGED_SETUP": "True",
         "SESSION_PATH": values["session_path"],
         "NAME": values["name"],
         "AUTO_LEAVE": "False",
@@ -230,7 +235,8 @@ def handler_errors(func):
         except Exception as exc:
             logger.exception("Handler %s failed: %s", func.__name__, exc)
             await message.reply_text(
-                "⚠️ An internal error occurred while processing your request. Check the manager logs for details.",
+                "❌ I could not complete that request.\n\n"
+                "💡 Check the command arguments and try again. If it keeps failing, review the manager logs.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
     return wrapper
@@ -259,37 +265,39 @@ class BotManager:
         self.app.on_message(filters.private & filters.command("status") & filters.user(self.config.owner_id))(self.status)
         self.app.on_message(filters.private & filters.command("deploy") & filters.user(self.config.owner_id))(self.deploy)
         self.app.on_message(filters.private & filters.command("stop") & filters.user(self.config.owner_id))(self.stop)
+        self.app.on_message(filters.private & filters.command("delete") & filters.user(self.config.owner_id))(self.delete)
         self.app.on_message(filters.private & filters.command("restart") & filters.user(self.config.owner_id))(self.restart)
 
     @handler_errors
     async def start(self, client: Client, message: Message) -> None:
         await message.reply_text(
-            "<b>Music Bot Deployment Manager</b>\n"
-            "Use /help to see available commands.",
+            "<b>🚀 Music Bot Deployment Manager</b>\n"
+            "📚 Use /help to see available commands.",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
 
     @handler_errors
     async def help(self, client: Client, message: Message) -> None:
         await message.reply_text(
-            "<b>Manager Commands</b>\n"
-            "/newbot &lt;name&gt; &lt;bot_token&gt; - Create and start a new deployment.\n"
-            "/list - Show all deployments.\n"
-            "/status &lt;name&gt; - Show deployment status.\n"
-            "/deploy &lt;name&gt; - Start a stopped deployment.\n"
-            "/stop &lt;name&gt; - Stop a running deployment.\n"
-            "/restart - Restart the manager bot.\n",
+            "<b>🧰 Manager Commands</b>\n"
+            "➕ /newbot &lt;name&gt; &lt;bot_token&gt; - Create and start a deployment.\n"
+            "📋 /list - Show all deployments.\n"
+            "🔎 /status &lt;name&gt; - Show deployment status.\n"
+            "▶️ /deploy &lt;name&gt; - Start a stopped deployment.\n"
+            "⏹️ /stop &lt;name&gt; - Stop a running deployment.\n"
+            "🗑️ /delete &lt;name&gt; - Permanently delete a deployment.\n"
+            "🔄 /restart - Restart the manager bot.\n",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
 
     @handler_errors
     async def list_bots(self, client: Client, message: Message) -> None:
         if not self.store.list():
-            return await message.reply_text("No deployments found.", reply_parameters=ReplyParameters(message_id=message.id))
+            return await message.reply_text("📭 No deployments found.", reply_parameters=ReplyParameters(message_id=message.id))
 
-        lines = ["<b>Deployments</b>"]
+        lines = ["<b>📋 Deployments</b>"]
         for name, deployment in self.store.list().items():
-            status = "running" if deployment.is_running else "stopped"
+            status = "🟢 running" if deployment.is_running else "⚫ stopped"
             lines.append(
                 f"<b>{deployment.username}</b> ({name}) — <code>{status}</code>"
             )
@@ -299,12 +307,12 @@ class BotManager:
     async def status(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            return await message.reply_text("Usage: /status &lt;name&gt;", reply_parameters=ReplyParameters(message_id=message.id))
+            return await message.reply_text("🔎 Usage: /status &lt;name&gt;", reply_parameters=ReplyParameters(message_id=message.id))
 
         name = normalize_name(args[1])
         deployment = self.store.get(name)
         if not deployment:
-            return await message.reply_text(f"Deployment <b>{name}</b> not found.", reply_parameters=ReplyParameters(message_id=message.id))
+            return await message.reply_text(f"❌ Deployment <b>{name}</b> was not found.\n\n💡 Use /list to check registered names.", reply_parameters=ReplyParameters(message_id=message.id))
 
         state = "running" if deployment.is_running else "stopped"
         text = (
@@ -312,6 +320,7 @@ class BotManager:
             f"Name: <code>{deployment.name}</code>\n"
             f"Bot ID: <code>{deployment.bot_id}</code>\n"
             f"DB: <code>{deployment.db_name or 'legacy'}</code>\n"
+            f"Deployment ID: <code>{deployment.deployment_id or 'legacy'}</code>\n"
             f"Status: <code>{state}</code>\n"
             f"PID: <code>{deployment.pid or 'none'}</code>\n"
             f"Created: {deployment.created_at}\n"
@@ -324,57 +333,114 @@ class BotManager:
     async def deploy(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            return await message.reply_text("Usage: /deploy &lt;name&gt;", reply_parameters=ReplyParameters(message_id=message.id))
+            return await message.reply_text("▶️ Usage: /deploy &lt;name&gt;", reply_parameters=ReplyParameters(message_id=message.id))
 
         name = normalize_name(args[1])
         deployment = self.store.get(name)
         if not deployment:
-            return await message.reply_text(f"Deployment <b>{name}</b> not found.", reply_parameters=ReplyParameters(message_id=message.id))
+            return await message.reply_text(f"❌ Deployment <b>{name}</b> was not found.\n\n💡 Use /list to check registered names.", reply_parameters=ReplyParameters(message_id=message.id))
 
         if deployment.is_running:
-            return await message.reply_text(f"Deployment <b>{name}</b> is already running.", reply_parameters=ReplyParameters(message_id=message.id))
+            return await message.reply_text(f"🟢 Deployment <b>{name}</b> is already running.", reply_parameters=ReplyParameters(message_id=message.id))
 
-        await message.reply_text(f"Starting deployment <b>{name}</b>...", reply_parameters=ReplyParameters(message_id=message.id))
+        status = await message.reply_text(f"🚀 Starting deployment <b>{name}</b>...", reply_parameters=ReplyParameters(message_id=message.id))
         started, error = self.start_process(deployment)
         if started:
             self.store.update(deployment)
-            await message.reply_text(f"Deployment <b>{name}</b> started.", reply_parameters=ReplyParameters(message_id=message.id))
+            await status.edit_text(f"✅ Deployment <b>{name}</b> started.")
         else:
             logger.error("Failed to start deployment %s: %s", name, error)
-            await message.reply_text(
-                f"Failed to start deployment <b>{name}</b>: {error}",
-                reply_parameters=ReplyParameters(message_id=message.id),
+            await status.edit_text(
+                f"❌ Deployment <b>{name}</b> could not start.\n\n"
+                "💡 Check its <code>run.log</code>, required dependencies, and generated <code>.env</code>, then try /deploy again."
             )
 
     @handler_errors
     async def stop(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            return await message.reply_text("Usage: /stop &lt;name&gt;", reply_parameters=ReplyParameters(message_id=message.id))
+            return await message.reply_text("⏹️ Usage: /stop &lt;name&gt;", reply_parameters=ReplyParameters(message_id=message.id))
 
         name = normalize_name(args[1])
         deployment = self.store.get(name)
         if not deployment:
-            return await message.reply_text(f"Deployment <b>{name}</b> not found.", reply_parameters=ReplyParameters(message_id=message.id))
+            return await message.reply_text(f"❌ Deployment <b>{name}</b> was not found.\n\n💡 Use /list to check registered names.", reply_parameters=ReplyParameters(message_id=message.id))
 
         if not deployment.is_running:
-            return await message.reply_text(f"Deployment <b>{name}</b> is not running.", reply_parameters=ReplyParameters(message_id=message.id))
+            return await message.reply_text(f"⚫ Deployment <b>{name}</b> is already stopped.", reply_parameters=ReplyParameters(message_id=message.id))
 
         stopped, error = self.stop_process(deployment)
         if stopped:
             self.store.update(deployment)
-            await message.reply_text(f"Deployment <b>{name}</b> stopped.", reply_parameters=ReplyParameters(message_id=message.id))
+            await message.reply_text(f"✅ Deployment <b>{name}</b> stopped.", reply_parameters=ReplyParameters(message_id=message.id))
         else:
             logger.error("Failed to stop deployment %s: %s", name, error)
             await message.reply_text(
-                f"Failed to stop deployment <b>{name}</b>: {error}",
+                f"❌ Deployment <b>{name}</b> could not be stopped.\n\n"
+                "💡 Check whether its process still exists, then try again.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
     @handler_errors
+    async def delete(self, client: Client, message: Message) -> None:
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            return await message.reply_text(
+                "🗑️ Usage: <code>/delete &lt;name&gt;</code>\n\n"
+                "⚠️ This permanently removes the deployment directory and manager record.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        name = normalize_name(args[1])
+        deployment = self.store.get(name)
+        if not deployment:
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> was not found.\n\n💡 Use /list to check the registered names.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        target = deployment.deployment_path.resolve()
+        deployments_root = self.config.deployments_dir.resolve()
+        if target.parent != deployments_root:
+            logger.error("Refusing unsafe deployment deletion path: %s", target)
+            return await message.reply_text(
+                "🛑 I refused to delete this deployment because its stored path is outside the deployments directory.\n\n"
+                "💡 Correct the deployment record before trying again.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        status = await message.reply_text(
+            f"🗑️ Preparing to delete deployment <b>{name}</b>...",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+        if deployment.is_running:
+            await status.edit_text(f"⏹️ Stopping deployment <b>{name}</b> before deletion...")
+            stopped, _ = self.stop_process(deployment)
+            if not stopped and deployment.is_running:
+                return await status.edit_text(
+                    "❌ The deployment is still running, so it was not deleted.\n\n"
+                    "💡 Stop the process manually or use /stop, then run /delete again."
+                )
+
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+            self.store.remove(name)
+            self.processes.pop(name, None)
+            self.failed_restarts.discard(name)
+        except Exception:
+            logger.exception("Failed to delete deployment %s", name)
+            return await status.edit_text(
+                "❌ I could not remove the deployment files.\n\n"
+                "💡 Check filesystem permissions and make sure no process is using the directory, then try again."
+            )
+
+        await status.edit_text(f"✅ Deployment <b>{name}</b> was permanently deleted.")
+
+    @handler_errors
     async def restart(self, client: Client, message: Message) -> None:
         await message.reply_text(
-            "Restarting manager bot...",
+            "🔄 Restarting manager bot...",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
         self.shutdown_event.set()
@@ -389,7 +455,7 @@ class BotManager:
         args = message.text.split(maxsplit=2)
         if len(args) < 3:
             return await message.reply_text(
-                "Usage: /newbot &lt;name&gt; &lt;bot_token&gt;",
+                "➕ Usage: /newbot &lt;name&gt; &lt;bot_token&gt;",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
@@ -401,21 +467,27 @@ class BotManager:
         if not mongo_url:
             logger.warning("No MongoDB URL provided for new deployment %s", name)
             return await message.reply_text(
-                "A MongoDB connection is required. Add MANAGER_DEFAULT_MONGO_URL to manager.env.",
+                "❌ New deployments need a MongoDB connection.\n\n"
+                "💡 Add <code>MANAGER_DEFAULT_MONGO_URL</code> to <code>manager.env</code>, then restart the manager.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
         if name in self.store.list():
-            return await message.reply_text(f"A deployment named <b>{name}</b> already exists.", reply_parameters=ReplyParameters(message_id=message.id))
+            return await message.reply_text(f"⚠️ A deployment named <b>{name}</b> already exists.\n\n💡 Choose another name or delete the existing deployment first.", reply_parameters=ReplyParameters(message_id=message.id))
 
-        await message.reply_text(f"Creating deployment <b>{name}</b>...", reply_parameters=ReplyParameters(message_id=message.id))
+        status = await message.reply_text(f"🔎 Verifying the bot token for <b>{name}</b>...", reply_parameters=ReplyParameters(message_id=message.id))
 
         try:
             bot_user = await self.verify_bot_token(bot_token)
             logger.info("Verified bot token for %s (%s)", name, bot_user.username or bot_user.first_name)
-        except RPCError as exc:
-            logger.error("Bot token verification failed for %s: %s", name, exc)
-            return await message.reply_text(f"Failed to verify bot token: {exc}", reply_parameters=ReplyParameters(message_id=message.id))
+        except RPCError:
+            logger.exception("Bot token verification failed for %s", name)
+            return await status.edit_text(
+                "❌ I could not verify that bot token.\n\n"
+                "💡 Copy a fresh token from @BotFather, make sure it belongs to a bot, then try /newbot again."
+            )
+
+        await status.edit_text(f"🧱 Creating isolated deployment <b>{name}</b>...")
 
         deployment_dir = self.config.deployments_dir / name
         deployment_dir.mkdir(parents=True, exist_ok=False)
@@ -425,13 +497,15 @@ class BotManager:
         if manager_downloads_path and not Path(manager_downloads_path).is_absolute():
             manager_downloads_path = str((ROOT / manager_downloads_path).resolve())
 
-        db_name = normalize_name(f"{name}_{bot_user.id}_{uuid.uuid4().hex[:8]}")
+        deployment_id = uuid.uuid4().hex
+        db_name = normalize_name(f"{name}_{bot_user.id}_{deployment_id[:8]}")
         env_vars = env_from_template(
             api_id=self.config.api_id,
             api_hash=self.config.api_hash,
             bot_token=bot_token,
             mongo_url=mongo_url,
             db_name=db_name,
+            deployment_id=deployment_id,
             session_path=str(deployment_dir),
             name=name,
             api_url=os.getenv("DEFAULT_API_URL", ""),
@@ -448,6 +522,7 @@ class BotManager:
             created_at=datetime.now(timezone.utc).isoformat(),
             path=str(deployment_dir.relative_to(ROOT)),
             db_name=db_name,
+            deployment_id=deployment_id,
         )
 
         started, error = self.start_process(deployment)
@@ -455,18 +530,19 @@ class BotManager:
             deployment.started_at = datetime.now(timezone.utc).isoformat()
             self.store.add(deployment)
             logger.info("Created and started deployment %s pid=%s", name, deployment.pid)
-            await message.reply_text(
-                f"Deployment <b>{name}</b> created and started.\n"
+            await status.edit_text(
+                f"✅ Deployment <b>{name}</b> created and started.\n"
                 f"Bot: <code>{deployment.username}</code>\n"
                 f"DB: <code>{deployment.db_name}</code>\n"
-                f"Path: <code>{deployment.deployment_path}</code>",
-                reply_parameters=ReplyParameters(message_id=message.id),
+                f"Deployment ID: <code>{deployment.deployment_id}</code>\n"
+                f"Path: <code>{deployment.deployment_path}</code>\n\n"
+                "➡️ Next: send /start to the deployed bot in private chat.",
             )
         else:
             logger.error("Deployment %s creation failed to start: %s", name, error)
-            await message.reply_text(
-                f"Deployment <b>{name}</b> created, but failed to start: {error}",
-                reply_parameters=ReplyParameters(message_id=message.id),
+            await status.edit_text(
+                f"⚠️ Deployment <b>{name}</b> was created, but it could not start.\n\n"
+                "💡 Check its <code>run.log</code>, dependencies, and generated <code>.env</code>, then use /deploy."
             )
 
     async def verify_bot_token(self, bot_token: str):
@@ -485,17 +561,6 @@ class BotManager:
             return bot
         finally:
             await temp.stop()
-
-    def _prepare_child(self) -> None:
-        # Detach child into its own session so signals to the manager
-        # do not directly target the child's process group. Previously
-        # we attempted to set PR_SET_PDEATHSIG so the child would
-        # receive SIGTERM when the parent died; remove that behavior
-        # so deployments continue running when the manager stops.
-        try:
-            os.setsid()
-        except Exception as exc:
-            logger.debug("Unable to setsid child process: %s", exc)
 
     def _log_task_exception(self, task: asyncio.Task) -> None:
         if task.cancelled():
@@ -537,29 +602,9 @@ class BotManager:
         except Exception as exc:
             logger.warning("Could not send deployment log for %s: %s", deployment.name, exc)
             self._notify_owner(
-                f"⚠️ Failed to send deployment log for <b>{deployment.name}</b>: {exc}"
+                f"⚠️ I could not send the error log for <b>{deployment.name}</b>.\n\n"
+                "💡 Check the deployment directory permissions and manager logs."
             )
-
-    def _find_running_deployment_process(self, deployment: DeploymentMeta) -> Optional[psutil.Process]:
-        target_path = deployment.deployment_path.resolve()
-        for proc in psutil.process_iter(["pid", "cwd", "cmdline"]):
-            try:
-                cmdline = proc.info.get("cmdline") or []
-                cwd = proc.info.get("cwd")
-                if not cmdline or len(cmdline) < 3:
-                    continue
-                if Path(cwd).resolve() != target_path:
-                    continue
-                if cmdline[0] != sys.executable:
-                    continue
-                if cmdline[1:3] != ["-m", "anony"]:
-                    continue
-                if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
-                    continue
-                return proc
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError, TypeError, ValueError):
-                continue
-        return None
 
     def _monitor_loop(self) -> None:
         logger.info("Deployment watcher started with interval %s seconds.", self.monitor_interval)
@@ -673,7 +718,7 @@ class BotManager:
             deployment.pid = None
             self.processes.pop(deployment.name, None)
             return True, None
-        except (psutil.NoSuchProcess, subprocess.TimeoutExpired, subprocess.TimeoutExpired, psutil.AccessDenied) as exc:
+        except (psutil.NoSuchProcess, subprocess.TimeoutExpired, psutil.AccessDenied) as exc:
             logger.warning("Graceful stop failed for %s pid=%s: %s", deployment.name, deployment.pid, exc)
             try:
                 if process:

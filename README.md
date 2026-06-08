@@ -229,30 +229,9 @@ Thanks to all the contributors, supporters, and users of the Aviax Music Bot. Yo
 
 A lightweight manager bot has been added to automate new music bot deployments from this template.
 
-### Setup
+Use `/newbot <name> <bot_token>` to create a deployment. The deployed bot then guides owner claim, log group setup, assistant session extraction, and optional support/update/language settings from Telegram.
 
-1. Copy `manager.env.sample` to `manager.env`
-2. Fill in `MANAGER_API_ID`, `MANAGER_API_HASH`, `MANAGER_BOT_TOKEN`, and `MANAGER_OWNER_ID`
-3. Optionally set `MANAGER_DEFAULT_MONGO_URL` and `MANAGER_DEFAULT_LOGGER_ID`
-4. Run the manager:
-
-```bash
-python manager.py
-```
-
-### Manager Commands
-
-- `/newbot <name> <bot_token> <session_string> [mongo_url]` — create and start a new deployment
-- `/list` — list existing deployments
-- `/status <name>` — check a deployment's status
-- `/deploy <name>` — start a stopped deployment
-- `/stop <name>` — stop a running deployment
-
-### Notes
-
-- The manager uses the current repository as the deployment template.
-- Deployments are stored under `deployments/<name>/` with a generated `.env` file.
-- A valid `SESSION` string is required by this template for the assistant userbot.
+See [Deployment Manager](docs/manager.md) for the manager env, PM2 command, commands, setup flow, and runtime isolation rules.
 
 ---
 

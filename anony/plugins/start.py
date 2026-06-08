@@ -31,7 +31,12 @@ async def start(_, message: types.Message):
         return await begin_session_setup(message)
 
     if private and not setup_complete():
-        await claim_owner(message.from_user)
+        claimed = await claim_owner(message.from_user)
+        if not claimed and not config.OWNER_ID:
+            return await message.reply_text(
+                "❌ I could not save the deployment owner.\n\n"
+                "💡 Check the database connection, then send /start again."
+            )
         return await message.reply_text(setup_text())
 
     if len(message.command) > 1 and message.command[1] == "help":

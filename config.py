@@ -2,7 +2,12 @@ from os import getenv
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(dotenv_path=Path.cwd() / ".env")
+
+
+def env_bool(key: str, default: str = "False") -> bool:
+    return getenv(key, default).lower() == "true"
+
 
 class Config:
     def __init__(self):
@@ -11,19 +16,21 @@ class Config:
 
         self.NAME = getenv("NAME", "Aviax Music")
         self.DB_NAME = getenv("DB_NAME", self.NAME)
+        self.DEPLOYMENT_ID = getenv("DEPLOYMENT_ID", "")
+        self.MANAGED_SETUP = env_bool("MANAGED_SETUP")
         self.BOT_TOKEN = getenv("BOT_TOKEN")
         self.MONGO_URL = getenv("MONGO_URL")
 
-        self.LOGGER_ID = int(getenv("LOGGER_ID", 0))
-        self.OWNER_ID = int(getenv("OWNER_ID", 0))
+        self.OWNER_ID = self.managed_int("OWNER_ID")
+        self.LOGGER_ID = self.managed_int("LOGGER_ID")
 
         self.DURATION_LIMIT = int(getenv("DURATION_LIMIT", 60)) * 60
         self.QUEUE_LIMIT = int(getenv("QUEUE_LIMIT", 20))
         self.PLAYLIST_LIMIT = int(getenv("PLAYLIST_LIMIT", 20))
 
-        self.SESSION1 = getenv("SESSION", None)
-        self.SESSION2 = getenv("SESSION2", None)
-        self.SESSION3 = getenv("SESSION3", None)
+        self.SESSION1 = self.managed_value("SESSION")
+        self.SESSION2 = self.managed_value("SESSION2")
+        self.SESSION3 = self.managed_value("SESSION3")
         self.SESSION_PATH = getenv("SESSION_PATH", None)
         downloads_path = getenv("DOWNLOADS_PATH", "")
         self.DOWNLOADS_PATH = Path(downloads_path).resolve() if downloads_path else None
@@ -35,11 +42,11 @@ class Config:
         self.VIDEO_API_URL = getenv("VIDEO_API_URL", "https://api.video.nexgenbots.xyz")
         self.API_KEY = getenv("API_KEY", None) # Get this value from https://console.nexgenbots.xyz
 
-        self.AUTO_LEAVE: bool = getenv("AUTO_LEAVE", "False").lower() == "true"
-        self.AUTO_END: bool = getenv("AUTO_END", "False").lower() == "true"
-    
-        self.THUMB_GEN: bool = getenv("THUMB_GEN", "True").lower() == "true"
-        self.VIDEO_PLAY: bool = getenv("VIDEO_PLAY", "True").lower() == "true"
+        self.AUTO_LEAVE: bool = env_bool("AUTO_LEAVE")
+        self.AUTO_END: bool = env_bool("AUTO_END")
+
+        self.THUMB_GEN: bool = env_bool("THUMB_GEN", "True")
+        self.VIDEO_PLAY: bool = env_bool("VIDEO_PLAY", "True")
 
         self.LANG_CODE = getenv("LANG_CODE", "en")
 
@@ -66,6 +73,12 @@ class Config:
             "COOKIES_URL": self.COOKIES_URL,
             "DOWNLOADS_PATH": self.DOWNLOADS_PATH,
         }
+
+    def managed_value(self, key: str):
+        return None if self.MANAGED_SETUP else getenv(key, None)
+
+    def managed_int(self, key: str) -> int:
+        return 0 if self.MANAGED_SETUP else int(getenv(key, 0))
 
     def check(self):
         missing = [
