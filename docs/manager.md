@@ -31,7 +31,7 @@ pm2 start "python3 manager.py" --name world
 ## Commands
 
 ```text
-/newbot <name> <bot_token>
+/newbot <name> <bot_token> [owner_id]
 /list
 /status <name>
 /deploy <name>
@@ -50,6 +50,13 @@ After `/newbot`, setup happens inside the deployed bot:
 2. Create a log group, add the deployed bot, promote it as admin, then run `/setlog` in that group.
 3. Use the Next button from the `/setlog` success message to start assistant session extraction in DM.
 4. Optionally set support group, updates channel, language, and more assistant sessions.
+
+You can skip first-user owner claiming by passing `owner_id` to `/newbot`.
+The deployed bot owner can also transfer ownership later with:
+
+```text
+/config owner_id <user_id>
+```
 
 ## Isolation Rules
 

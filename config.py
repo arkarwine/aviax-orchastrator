@@ -21,7 +21,7 @@ class Config:
         self.BOT_TOKEN = getenv("BOT_TOKEN")
         self.MONGO_URL = getenv("MONGO_URL")
 
-        self.OWNER_ID = self.managed_int("OWNER_ID")
+        self.OWNER_ID = int(getenv("OWNER_ID", 0))
         self.LOGGER_ID = self.managed_int("LOGGER_ID")
 
         self.DURATION_LIMIT = int(getenv("DURATION_LIMIT", 60)) * 60

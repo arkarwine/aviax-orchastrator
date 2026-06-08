@@ -225,6 +225,8 @@ def env_from_template(**values: str) -> Dict[str, str]:
         env["DOWNLOADS_PATH"] = values["downloads_path"]
     if values.get("api_key"):
         env["API_KEY"] = values["api_key"]
+    if values.get("owner_id"):
+        env["OWNER_ID"] = values["owner_id"]
     return env
 
 
@@ -280,7 +282,7 @@ class BotManager:
     async def help(self, client: Client, message: Message) -> None:
         await message.reply_text(
             "<b>🧰 Manager Commands</b>\n"
-            "➕ /newbot &lt;name&gt; &lt;bot_token&gt; - Create and start a deployment.\n"
+            "➕ /newbot &lt;name&gt; &lt;bot_token&gt; [owner_id] - Create and start a deployment.\n"
             "📋 /list - Show all deployments.\n"
             "🔎 /status &lt;name&gt; - Show deployment status.\n"
             "▶️ /deploy &lt;name&gt; - Start a stopped deployment.\n"
@@ -452,17 +454,25 @@ class BotManager:
 
     @handler_errors
     async def newbot(self, client: Client, message: Message) -> None:
-        args = message.text.split(maxsplit=2)
+        args = message.text.split(maxsplit=3)
         if len(args) < 3:
             return await message.reply_text(
-                "➕ Usage: /newbot &lt;name&gt; &lt;bot_token&gt;",
+                "➕ Usage: /newbot &lt;name&gt; &lt;bot_token&gt; [owner_id]",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
         name = normalize_name(args[1])
         bot_token = args[2].strip()
+        owner_id = args[3].strip() if len(args) > 3 else ""
         mongo_url = self.config.default_mongo_url
         logger.info("Received newbot request for %s", name)
+
+        if owner_id and not owner_id.isdigit():
+            return await message.reply_text(
+                "❌ Owner ID must be numeric.\n\n"
+                "💡 Send only the Telegram user ID, for example <code>123456789</code>.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
 
         if not mongo_url:
             logger.warning("No MongoDB URL provided for new deployment %s", name)
@@ -512,6 +522,7 @@ class BotManager:
             video_api_url=os.getenv("DEFAULT_VIDEO_API_URL", ""),
             downloads_path=manager_downloads_path,
             api_key=self.config.api_key,
+            owner_id=owner_id,
         )
         env_path.write_text("\n".join(f"{key}={value}" for key, value in env_vars.items()), encoding="utf-8")
 
@@ -530,14 +541,20 @@ class BotManager:
             deployment.started_at = datetime.now(timezone.utc).isoformat()
             self.store.add(deployment)
             logger.info("Created and started deployment %s pid=%s", name, deployment.pid)
-            await status.edit_text(
+            created_text = (
                 f"✅ Deployment <b>{name}</b> created and started.\n"
                 f"Bot: <code>{deployment.username}</code>\n"
                 f"DB: <code>{deployment.db_name}</code>\n"
                 f"Deployment ID: <code>{deployment.deployment_id}</code>\n"
-                f"Path: <code>{deployment.deployment_path}</code>\n\n"
-                "➡️ Next: send /start to the deployed bot in private chat.",
             )
+            if owner_id:
+                created_text += f"Owner ID: <code>{owner_id}</code>\n"
+            created_text += f"Path: <code>{deployment.deployment_path}</code>\n\n"
+            if owner_id:
+                created_text += "➡️ Next: continue setup from the deployed bot."
+            else:
+                created_text += "➡️ Next: send /start to the deployed bot in private chat."
+            await status.edit_text(created_text)
         else:
             logger.error("Deployment %s creation failed to start: %s", name, error)
             await status.edit_text(

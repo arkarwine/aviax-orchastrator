@@ -5,7 +5,29 @@
 
 from pyrogram import enums, filters, types
 
-from anony import app, config, db, lang
+from anony import app, config, db, lang, logger
+
+
+VALID_KEYS = [
+    "AUTO_LEAVE",
+    "AUTO_END",
+    "THUMB_GEN",
+    "VIDEO_PLAY",
+    "LANG_CODE",
+    "DEFAULT_THUMB",
+    "PING_IMG",
+    "START_IMG",
+    "OWNER_ID",
+]
+BOOL_KEYS = {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY"}
+
+
+async def apply_owner_id(value: int) -> None:
+    await db.set_config("OWNER_ID", value)
+    await db.add_sudo(value)
+    config.apply_runtime_config({"OWNER_ID": value})
+    app.owner = value
+    app.sudoers.add(value)
 
 
 @app.on_message(filters.command(["config", "botconfig"]) & ~app.bl_users)
@@ -23,18 +45,6 @@ async def _settings(_, m: types.Message):
 
     runtime = await db.get_all_config()
 
-    valid_keys = [
-        "AUTO_LEAVE",
-        "AUTO_END",
-        "THUMB_GEN",
-        "VIDEO_PLAY",
-        "LANG_CODE",
-        "DEFAULT_THUMB",
-        "PING_IMG",
-        "START_IMG",
-    ]
-    bool_keys = {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY"}
-
     def short(value: str, limit: int = 50) -> str:
         return value if not value or len(value) <= limit else value[:limit - 3] + "..."
 
@@ -50,12 +60,14 @@ async def _settings(_, m: types.Message):
             "• lang_code (e.g. en, fr, de)\n"
             "• default_thumb (image URL)\n"
             "• ping_img (image URL)\n"
-            "• start_img (image URL)\n\n"
+            "• start_img (image URL)\n"
+            "• owner_id (Telegram user ID, owner only)\n\n"
             "Use <code>/config &lt;key&gt; &lt;value&gt;</code> to update a setting.\n"
             "Use <code>/config &lt;key&gt;</code> to view the current value.\n\n"
             "Examples:\n"
             "<code>/config auto_leave true</code>\n"
             "<code>/config lang_code en</code>\n"
+            "<code>/config owner_id 123456789</code>\n"
             "<code>/config default_thumb https://example.com/thumb.jpg</code>\n"
             "<code>/config ping_img https://example.com/ping.jpg</code>\n"
         )
@@ -63,9 +75,9 @@ async def _settings(_, m: types.Message):
         return
 
     key = m.command[1].upper()
-    if key not in valid_keys:
+    if key not in VALID_KEYS:
         return await m.reply_text(
-            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, lang_code, default_thumb, ping_img, start_img"
+            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, lang_code, default_thumb, ping_img, start_img, owner_id"
         )
 
     if len(m.command) == 2:
@@ -81,12 +93,39 @@ async def _settings(_, m: types.Message):
     if not value:
         return await m.reply_text(f"❌ Please provide a value for <code>{key}</code>.")
 
-    if key in bool_keys:
+    if key == "OWNER_ID" and m.from_user.id != app.owner:
+        return await m.reply_text(
+            "🔒 Only the current owner can change <code>OWNER_ID</code>.\n\n"
+            "💡 Ask the owner to run <code>/config owner_id &lt;user_id&gt;</code>."
+        )
+
+    if key in BOOL_KEYS:
         if value.lower() not in ("true", "false", "on", "off", "yes", "no", "1", "0"):
             return await m.reply_text(
                 "❌ Boolean values must be true or false. Example: <code>true</code> or <code>false</code>."
             )
         value = value.lower() in ("true", "on", "yes", "1")
+
+    if key == "OWNER_ID":
+        if not value.isdigit() or int(value) <= 0:
+            return await m.reply_text(
+                "❌ Owner ID must be a positive number.\n\n"
+                "💡 Use the Telegram user ID, for example <code>123456789</code>."
+            )
+        value = int(value)
+        status = await m.reply_text("👑 Updating bot owner...")
+        try:
+            await apply_owner_id(value)
+        except Exception:
+            logger.exception("Could not update owner id")
+            return await status.edit_text(
+                "❌ I could not update the owner.\n\n"
+                "💡 Check the database connection and try again."
+            )
+        return await status.edit_text(
+            f"✅ Owner updated to <code>{value}</code>.\n\n"
+            "👑 The new owner now has sudo access too."
+        )
 
     await db.set_config(key, value)
     config.apply_runtime_config({key: value})
