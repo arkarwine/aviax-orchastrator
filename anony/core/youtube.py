@@ -122,9 +122,7 @@ class YouTube:
 
     async def download(self, video_id: str, video: bool = False) -> str | None:
         if self.api:
-            print(0)
             if file_path := await self.api.download(video_id, video):
-                print(1)
                 return file_path
 
         url = self.base + video_id

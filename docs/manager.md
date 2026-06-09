@@ -58,6 +58,8 @@ The deployed bot owner can also transfer ownership later with:
 /config owner_id <user_id>
 ```
 
+Only the current owner can transfer ownership. The new owner receives sudo access, and the previous owner loses it.
+
 ## Isolation Rules
 
 Each manager-created deployment gets:

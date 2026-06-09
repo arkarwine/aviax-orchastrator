@@ -5,6 +5,7 @@
 
 from ntgcalls import (ConnectionNotFound, TelegramServerError,
                       RTMPStreamingUnsupported, ConnectionError)
+from pyrogram import raw
 from pyrogram.errors import (ChatSendMediaForbidden, ChatSendPhotosForbidden,
                              MessageIdInvalid)
 from pyrogram.types import InputMediaPhoto, Message
@@ -30,16 +31,37 @@ class TgCall(PyTgCalls):
         await db.playing(chat_id, paused=False)
         return await client.resume(chat_id)
 
-    async def stop(self, chat_id: int) -> None:
-        client = await db.get_assistant(chat_id)
+    async def stop(self, chat_id: int, leave_call: bool = True) -> None:
+        was_active = await db.get_call(chat_id)
         queue.clear(chat_id)
         await db.remove_call(chat_id)
         await db.set_loop(chat_id, 0)
 
+        if not leave_call or not was_active:
+            return
+
+        client = await db.get_assistant(chat_id)
         try:
             await client.leave_call(chat_id, close=False)
-        except Exception:
-            pass
+        except (ConnectionNotFound, exceptions.NoActiveGroupCall):
+            logger.debug("Voice call %s was already closed.", chat_id)
+        except Exception as exc:
+            logger.warning("Could not leave voice call %s cleanly: %s", chat_id, exc)
+
+    async def has_active_group_call(self, chat_id: int) -> bool:
+        try:
+            peer = await app.resolve_peer(chat_id)
+            channel = raw.types.InputChannel(
+                channel_id=peer.channel_id,
+                access_hash=peer.access_hash,
+            )
+            full_chat = await app.invoke(
+                raw.functions.channels.GetFullChannel(channel=channel)
+            )
+            return bool(getattr(full_chat.full_chat, "call", None))
+        except Exception as exc:
+            logger.debug("Could not preflight voice chat %s: %s", chat_id, exc)
+            return True
 
 
     async def play_media(
@@ -60,6 +82,11 @@ class TgCall(PyTgCalls):
         if not media.file_path:
             await message.edit_text(_lang["error_no_file"].format(config.SUPPORT_CHAT))
             return await self.play_next(chat_id)
+
+        if not await self.has_active_group_call(chat_id):
+            await self.stop(chat_id, leave_call=False)
+            await message.edit_text(_lang["error_no_call"])
+            return
 
         stream = types.MediaStream(
             media_path=media.file_path,
@@ -119,13 +146,13 @@ class TgCall(PyTgCalls):
             await message.edit_text(_lang["error_no_file"].format(config.SUPPORT_CHAT))
             await self.play_next(chat_id)
         except exceptions.NoActiveGroupCall:
-            await self.stop(chat_id)
+            await self.stop(chat_id, leave_call=False)
             await message.edit_text(_lang["error_no_call"])
         except exceptions.NoAudioSourceFound:
             await message.edit_text(_lang["error_no_audio"])
             await self.play_next(chat_id)
         except (ConnectionError, ConnectionNotFound, TelegramServerError):
-            await self.stop(chat_id)
+            await self.stop(chat_id, leave_call=False)
             await message.edit_text(_lang["error_tg_server"])
         except RTMPStreamingUnsupported:
             await self.stop(chat_id)
@@ -196,7 +223,7 @@ class TgCall(PyTgCalls):
                     types.ChatUpdate.Status.LEFT_GROUP,
                     types.ChatUpdate.Status.CLOSED_VOICE_CHAT,
                 ]:
-                    await self.stop(update.chat_id)
+                    await self.stop(update.chat_id, leave_call=False)
 
 
     async def boot(self) -> None:

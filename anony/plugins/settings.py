@@ -23,11 +23,18 @@ BOOL_KEYS = {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY"}
 
 
 async def apply_owner_id(value: int) -> None:
+    previous_owner = app.owner
     await db.set_config("OWNER_ID", value)
     await db.add_sudo(value)
     config.apply_runtime_config({"OWNER_ID": value})
     app.owner = value
     app.sudoers.add(value)
+    if previous_owner and previous_owner != value:
+        app.sudoers.discard(previous_owner)
+        try:
+            await db.del_sudo(previous_owner)
+        except Exception:
+            logger.warning("Owner changed, but old owner sudo cleanup failed.")
 
 
 @app.on_message(filters.command(["config", "botconfig"]) & ~app.bl_users)

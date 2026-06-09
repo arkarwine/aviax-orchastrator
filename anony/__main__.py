@@ -39,7 +39,19 @@ async def idle():
 
 async def main():
     await db.connect()
-    runtime_settings = deployment_runtime_settings(await db.get_all_config())
+    stored_runtime_settings = await db.get_all_config()
+    if (
+        config.MANAGED_SETUP
+        and config.DEPLOYMENT_ID
+        and config.OWNER_ID
+        and not stored_runtime_settings
+    ):
+        await db.set_config("DEPLOYMENT_ID", config.DEPLOYMENT_ID)
+        await db.set_config("OWNER_ID", config.OWNER_ID)
+        await db.add_sudo(config.OWNER_ID)
+        stored_runtime_settings = await db.get_all_config()
+
+    runtime_settings = deployment_runtime_settings(stored_runtime_settings)
 
     if runtime_settings:
         config.apply_runtime_config(runtime_settings)
