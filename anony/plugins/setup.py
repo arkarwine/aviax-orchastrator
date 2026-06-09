@@ -3,6 +3,8 @@
 # This file is part of AnonXMusic
 
 
+from html import escape
+
 from pyrogram import Client, enums, filters, types
 from pyrogram.errors import (
     PasswordHashInvalid,
@@ -211,6 +213,73 @@ async def _set_lang_code(_, m: types.Message):
 @lang.language()
 async def _add_session_start(_, m: types.Message):
     await begin_session_setup(m)
+
+
+@app.on_message(filters.command(["editsession", "setsession"]) & filters.private & ~app.bl_users)
+@lang.language()
+async def _edit_session(_, m: types.Message):
+    if not is_owner(m.from_user.id):
+        return await m.reply_text("🔒 Only the deployment owner can replace assistant sessions.")
+
+    parts = (m.text or "").split(maxsplit=2)
+    if len(parts) < 3 or parts[1] not in {"1", "2", "3"}:
+        return await m.reply_text(
+            "🔐 Usage: <code>/editsession &lt;1|2|3&gt; &lt;session_string&gt;</code>\n\n"
+            "💡 Choose the assistant slot you want to replace."
+        )
+
+    slot = int(parts[1])
+    session_string = parts[2].strip()
+    if not session_string:
+        return await m.reply_text("❌ The session string cannot be empty.")
+
+    try:
+        await m.delete()
+    except Exception:
+        pass
+
+    status = await app.send_message(m.chat.id, f"🔎 Validating assistant session slot {slot}...")
+    client = Client(
+        name=f"session-check-{m.from_user.id}-{slot}",
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        session_string=session_string,
+        in_memory=True,
+    )
+    started = False
+    try:
+        await client.start()
+        started = True
+        assistant = await client.get_me()
+    except Exception:
+        logger.exception("Could not validate replacement assistant session")
+        return await status.edit_text(
+            "❌ That session string could not be validated.\n\n"
+            "💡 Generate a fresh session string for the user account and try again."
+        )
+    finally:
+        if started:
+            try:
+                await client.stop()
+            except Exception:
+                logger.exception("Could not stop assistant session validation client")
+
+    await status.edit_text(f"💾 Saving assistant session slot {slot}...")
+    try:
+        await db.set_config(f"SESSION{slot}", session_string)
+    except Exception:
+        logger.exception("Could not save replacement assistant session")
+        return await status.edit_text(
+            "❌ I could not save the replacement session.\n\n"
+            "💡 Check the database connection and try again."
+        )
+
+    config.apply_runtime_config({f"SESSION{slot}": session_string})
+    assistant_name = escape(assistant.first_name or assistant.username or str(assistant.id))
+    await status.edit_text(
+        f"✅ Assistant session slot {slot} updated for <b>{assistant_name}</b>.\n\n"
+        "🔄 Run <code>/restart</code> to activate the replacement session."
+    )
 
 
 async def begin_session_setup(m: types.Message):

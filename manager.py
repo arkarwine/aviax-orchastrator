@@ -343,7 +343,12 @@ class BotManager:
             return await message.reply_text(f"❌ Deployment <b>{name}</b> was not found.\n\n💡 Use /list to check registered names.", reply_parameters=ReplyParameters(message_id=message.id))
 
         if deployment.is_running:
-            return await message.reply_text(f"🟢 Deployment <b>{name}</b> is already running.", reply_parameters=ReplyParameters(message_id=message.id))
+            return await message.reply_text(
+                f"🟢 Deployment process <b>{name}</b> is still running.\n\n"
+                f"💡 If the bot is unresponsive or already stopped responding, run <code>/stop {name}</code> "
+                f"to finish terminating its process, then run <code>/deploy {name}</code>.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
 
         status = await message.reply_text(f"🚀 Starting deployment <b>{name}</b>...", reply_parameters=ReplyParameters(message_id=message.id))
         started, error = self.start_process(deployment)
@@ -717,35 +722,57 @@ class BotManager:
         if not deployment.pid:
             logger.warning("Deployment %s has no pid to stop.", deployment.name)
             return False, "No pid found for deployment."
-        logger.info("Stopping deployment %s pid=%s", deployment.name, deployment.pid)
+        pid = deployment.pid
+        logger.info("Stopping deployment %s pid=%s", deployment.name, pid)
         process = self.processes.get(deployment.name)
-        try:
-            if process and process.poll() is None:
-                process.terminate()
-            else:
-                os.killpg(os.getpgid(deployment.pid), signal.SIGTERM)
-        except Exception as exc:
-            logger.warning("Failed graceful terminate for %s pid=%s: %s", deployment.name, deployment.pid, exc)
-        try:
-            if process:
-                process.wait(timeout=10)
-            else:
-                psutil.Process(deployment.pid).wait(timeout=10)
+
+        def stopped() -> tuple[bool, Optional[str]]:
             logger.info("Deployment %s stopped.", deployment.name)
             deployment.pid = None
             self.processes.pop(deployment.name, None)
             return True, None
-        except (psutil.NoSuchProcess, subprocess.TimeoutExpired, psutil.AccessDenied) as exc:
-            logger.warning("Graceful stop failed for %s pid=%s: %s", deployment.name, deployment.pid, exc)
+
+        try:
+            if process and process.poll() is None:
+                process.terminate()
+            else:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except Exception as exc:
+            logger.warning("Failed graceful terminate for %s pid=%s: %s", deployment.name, pid, exc)
+        try:
+            if process:
+                process.wait(timeout=10)
+            else:
+                psutil.Process(pid).wait(timeout=10)
+            return stopped()
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            return stopped()
+        except (psutil.TimeoutExpired, subprocess.TimeoutExpired) as exc:
+            logger.warning("Graceful stop timed out for %s pid=%s: %s", deployment.name, pid, exc)
             try:
                 if process:
                     process.kill()
                 else:
-                    os.killpg(os.getpgid(deployment.pid), signal.SIGKILL)
-            except Exception as exc2:
-                logger.error("Failed to kill deployment %s pid=%s: %s", deployment.name, deployment.pid, exc2)
-            deployment.pid = None
-            self.processes.pop(deployment.name, None)
+                    os.killpg(os.getpgid(pid), getattr(signal, "SIGKILL", signal.SIGTERM))
+            except (ProcessLookupError, psutil.NoSuchProcess):
+                return stopped()
+            except Exception as kill_error:
+                logger.error("Failed to kill deployment %s pid=%s: %s", deployment.name, pid, kill_error)
+                return False, str(kill_error)
+
+            try:
+                if process:
+                    process.wait(timeout=5)
+                else:
+                    psutil.Process(pid).wait(timeout=5)
+                return stopped()
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                return stopped()
+            except (psutil.TimeoutExpired, subprocess.TimeoutExpired, psutil.AccessDenied) as wait_error:
+                logger.error("Deployment %s pid=%s still exists after force-stop: %s", deployment.name, pid, wait_error)
+                return False, str(wait_error)
+        except psutil.AccessDenied as exc:
+            logger.error("Permission denied while stopping deployment %s pid=%s: %s", deployment.name, pid, exc)
             return False, str(exc)
 
     def load_deployment_env(self, path: Path) -> Dict[str, str]:
