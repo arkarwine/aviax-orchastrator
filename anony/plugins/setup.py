@@ -14,6 +14,7 @@ from pyrogram.errors import (
 )
 
 from anony import anon, app, config, db, lang, logger, userbot
+from anony.core.commands import set_user_command_menu
 from anony.helpers import buttons
 
 
@@ -39,6 +40,10 @@ async def claim_owner(user: types.User) -> bool:
     config.apply_runtime_config({"OWNER_ID": user.id})
     app.owner = user.id
     app.sudoers.add(user.id)
+    try:
+        await set_user_command_menu(user.id, owner=True)
+    except Exception:
+        logger.warning("Owner claimed, but the owner command menu could not be updated.")
     return True
 
 

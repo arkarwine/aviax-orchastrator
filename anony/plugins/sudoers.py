@@ -5,7 +5,8 @@
 
 from pyrogram import filters, types
 
-from anony import app, db, lang
+from anony import app, db, lang, logger
+from anony.core.commands import set_public_user_command_menu, set_user_command_menu
 from anony.helpers import utils
 
 
@@ -25,6 +26,10 @@ async def _sudo(_, m: types.Message):
 
         app.sudoers.add(user.id)
         await db.add_sudo(user.id)
+        try:
+            await set_user_command_menu(user.id)
+        except Exception:
+            logger.warning("Sudo user added, but their command menu could not be updated.")
         await m.reply_text(m.lang["sudo_added"].format(user.mention))
     else:
         if user.id not in app.sudoers:
@@ -32,6 +37,10 @@ async def _sudo(_, m: types.Message):
 
         app.sudoers.discard(user.id)
         await db.del_sudo(user.id)
+        try:
+            await set_public_user_command_menu(user.id)
+        except Exception:
+            logger.warning("Sudo user removed, but their command menu could not be updated.")
         await m.reply_text(m.lang["sudo_removed"].format(user.mention))
 
 

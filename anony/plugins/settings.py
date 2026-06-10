@@ -10,6 +10,7 @@ from pyrogram import enums, filters, types
 from config import Config
 
 from anony import app, config, db, lang, logger, yt
+from anony.core.commands import set_public_user_command_menu, set_user_command_menu, sync_command_menus
 from anony.helpers import NexGenApi
 
 
@@ -81,6 +82,14 @@ async def apply_owner_id(value: int) -> None:
             await db.del_sudo(previous_owner)
         except Exception:
             logger.warning("Owner changed, but old owner sudo cleanup failed.")
+        try:
+            await set_public_user_command_menu(previous_owner)
+        except Exception:
+            logger.warning("Owner changed, but old owner command menu cleanup failed.")
+    try:
+        await set_user_command_menu(value, owner=True)
+    except Exception:
+        logger.warning("Owner changed, but the new owner command menu could not be updated.")
 
 
 async def build_api_client(settings: dict):
@@ -192,6 +201,7 @@ async def _refresh_config(_, m: types.Message):
             for key in config._runtime_defaults
         }
 
+        previous_privileged = set(app.sudoers)
         app.owner = config.OWNER_ID
         app.logger = config.LOGGER_ID
         app.sudoers.clear()
@@ -201,6 +211,11 @@ async def _refresh_config(_, m: types.Message):
 
         lang.languages = refreshed_languages
         db.lang.clear()
+
+        await status.edit_text("📋 Refreshing registered command menus...")
+        menu_warnings = await sync_command_menus(previous_privileged)
+        if menu_warnings:
+            subsystem_errors.append("registered command menus")
 
         try:
             from anony.plugins.misc import sync_optional_tasks

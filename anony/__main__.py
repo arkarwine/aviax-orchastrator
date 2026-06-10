@@ -9,6 +9,7 @@ import signal
 from contextlib import suppress
 
 from anony import anon, app, config, db, logger, stop, thumb, userbot, yt
+from anony.core.commands import sync_command_menus
 from anony.plugins import all_modules
 
 
@@ -79,6 +80,9 @@ async def main():
     app.sudoers.update(sudoers)
     app.bl_users.update(await db.get_blacklisted())
     logger.info(f"Loaded {len(app.sudoers)} sudo users.")
+    menu_warnings = await sync_command_menus()
+    if menu_warnings:
+        logger.warning("Command menus registered with %d warning(s).", len(menu_warnings))
 
     await idle()
     await stop()
