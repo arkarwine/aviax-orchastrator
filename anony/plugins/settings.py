@@ -3,9 +3,14 @@
 # This file is part of AnonXMusic
 
 
+import asyncio
+
 from pyrogram import enums, filters, types
 
-from anony import app, config, db, lang, logger
+from config import Config
+
+from anony import app, config, db, lang, logger, yt
+from anony.helpers import NexGenApi
 
 
 VALID_KEYS = [
@@ -20,6 +25,47 @@ VALID_KEYS = [
     "OWNER_ID",
 ]
 BOOL_KEYS = {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY"}
+RESTART_REQUIRED_KEYS = {
+    "API_ID",
+    "API_HASH",
+    "BOT_TOKEN",
+    "MONGO_URL",
+    "DB_NAME",
+    "DEPLOYMENT_ID",
+    "MANAGED_SETUP",
+    "SESSION_PATH",
+    "SESSION1",
+    "SESSION2",
+    "SESSION3",
+}
+refresh_lock = asyncio.Lock()
+
+
+def restart_reason_lines(keys: list[str]) -> list[str]:
+    groups = (
+        (
+            {"API_ID", "API_HASH", "BOT_TOKEN", "SESSION_PATH"},
+            "Telegram client identity or session storage",
+        ),
+        (
+            {"MONGO_URL", "DB_NAME", "DEPLOYMENT_ID", "MANAGED_SETUP"},
+            "database connection or deployment identity",
+        ),
+        (
+            {"SESSION1", "SESSION2", "SESSION3"},
+            "active assistant account sessions",
+        ),
+    )
+    lines = []
+    for group, reason in groups:
+        matched = sorted(set(keys) & group)
+        if matched:
+            lines.append(
+                "• "
+                + ", ".join(f"<code>{key}</code>" for key in matched)
+                + f": {reason}"
+            )
+    return lines
 
 
 async def apply_owner_id(value: int) -> None:
@@ -35,6 +81,176 @@ async def apply_owner_id(value: int) -> None:
             await db.del_sudo(previous_owner)
         except Exception:
             logger.warning("Owner changed, but old owner sudo cleanup failed.")
+
+
+async def build_api_client(settings: dict):
+    if not all(settings.get(key) for key in ("API_URL", "VIDEO_API_URL", "API_KEY")):
+        return None
+    api = NexGenApi(
+        settings["API_URL"],
+        settings["API_KEY"],
+        settings["VIDEO_API_URL"],
+    )
+    await api.get_session()
+    return api
+
+
+async def close_api_client(api) -> None:
+    if api and api.session and not api.session.closed:
+        await api.session.close()
+
+
+@app.on_message(
+    filters.command(["refreshconfig", "reloadconfig"])
+    & filters.private
+    & ~app.bl_users
+)
+@lang.language()
+async def _refresh_config(_, m: types.Message):
+    if m.from_user.id not in app.sudoers:
+        return await m.reply_text(
+            "🔒 You need sudo access to refresh the live configuration."
+        )
+    if refresh_lock.locked():
+        return await m.reply_text(
+            "⏳ A configuration refresh is already running. Please wait for it to finish."
+        )
+
+    async with refresh_lock:
+        status = await m.reply_text("📂 Reading configuration from disk...")
+        current = config.snapshot()
+        try:
+            candidate = Config.from_disk()
+            candidate.check()
+            disk_defaults = candidate.snapshot()
+            await status.edit_text("🗄️ Loading runtime overrides from the database...")
+            runtime = await db.get_all_config()
+            if (
+                candidate.MANAGED_SETUP
+                and candidate.DEPLOYMENT_ID
+                and runtime
+                and runtime.get("DEPLOYMENT_ID") != candidate.DEPLOYMENT_ID
+            ):
+                return await status.edit_text(
+                    "❌ The stored runtime configuration belongs to a different deployment.\n\n"
+                    "💡 Correct the deployment identity before refreshing. Nothing was changed."
+                )
+            candidate.apply_runtime_config(
+                {key: value for key, value in runtime.items() if key != "DEPLOYMENT_ID"}
+            )
+            desired = candidate.snapshot()
+            sudoers = set(await db.get_sudoers())
+        except (FileNotFoundError, ValueError, TypeError, SystemExit):
+            logger.exception("Could not parse configuration refresh")
+            return await status.edit_text(
+                "❌ I could not read a valid configuration from disk.\n\n"
+                "💡 Check the deployment <code>.env</code> values and try again. Nothing was changed."
+            )
+        except Exception:
+            logger.exception("Could not load runtime configuration refresh")
+            return await status.edit_text(
+                "❌ I could not load the stored runtime configuration.\n\n"
+                "💡 Check the database connection and try again. Nothing was changed."
+            )
+
+        await status.edit_text("🌐 Validating language files...")
+        try:
+            refreshed_languages = lang.load_files()
+        except Exception:
+            logger.exception("Could not reload language files")
+            return await status.edit_text(
+                "❌ One or more language files could not be loaded.\n\n"
+                "💡 Fix the locale JSON files and try again. Nothing was changed."
+            )
+
+        changed = {
+            key for key in Config.KEYS
+            if current.get(key) != desired.get(key)
+        }
+        restart_required = sorted(changed & RESTART_REQUIRED_KEYS)
+        live_changes = sorted(changed - RESTART_REQUIRED_KEYS)
+        api_changed = bool({"API_URL", "VIDEO_API_URL", "API_KEY"} & set(live_changes))
+
+        new_api = yt.api
+        if api_changed:
+            await status.edit_text("🔌 Preparing refreshed API configuration...")
+            try:
+                new_api = await build_api_client(desired)
+            except Exception:
+                logger.exception("Could not prepare refreshed API client")
+                return await status.edit_text(
+                    "❌ The refreshed API configuration could not be prepared.\n\n"
+                    "💡 Check the API settings and try again. Nothing was changed."
+                )
+
+        await status.edit_text("⚡ Applying safe configuration changes...")
+        subsystem_errors = []
+        safe_values = {key: desired[key] for key in live_changes}
+        config.apply_runtime_config(safe_values)
+        config._runtime_defaults = {
+            key: disk_defaults[key]
+            for key in config._runtime_defaults
+        }
+
+        app.owner = config.OWNER_ID
+        app.logger = config.LOGGER_ID
+        app.sudoers.clear()
+        if app.owner:
+            sudoers.add(app.owner)
+        app.sudoers.update(sudoers)
+
+        lang.languages = refreshed_languages
+        db.lang.clear()
+
+        try:
+            from anony.plugins.misc import sync_optional_tasks
+            await sync_optional_tasks()
+        except Exception:
+            logger.exception("Could not synchronize optional background tasks")
+            subsystem_errors.append("background tasks")
+
+        if api_changed:
+            old_api = yt.api
+            yt.api = new_api
+            try:
+                await close_api_client(old_api)
+            except Exception:
+                logger.exception("Could not close previous API client")
+                subsystem_errors.append("previous API connection cleanup")
+
+        if "COOKIES_URL" in live_changes:
+            yt.cookies.clear()
+            yt.warned = False
+            if config.COOKIES_URL:
+                try:
+                    await yt.save_cookies(config.COOKIES_URL)
+                    yt.checked = False
+                except Exception:
+                    logger.exception("Could not refresh cookie files")
+                    subsystem_errors.append("cookie download")
+            else:
+                yt.checked = True
+
+        unchanged = len(Config.KEYS) - len(changed)
+        text = (
+            "✅ <b>Configuration refreshed.</b>\n\n"
+            f"⚡ Applied live: <code>{len(live_changes)}</code> settings\n"
+            f"🌐 Reloaded: <code>{len(refreshed_languages)}</code> language files\n"
+            f"⏸️ Unchanged: <code>{unchanged}</code> settings"
+        )
+        if restart_required:
+            text += (
+                "\n\n🔄 <b>Restart required</b>\n"
+                + "\n".join(restart_reason_lines(restart_required))
+                + "\nThese settings were not applied live."
+            )
+        if subsystem_errors:
+            text += (
+                "\n\n⚠️ Some live services could not be fully refreshed: "
+                + ", ".join(subsystem_errors)
+                + ". Their existing state was kept where possible."
+            )
+        await status.edit_text(text)
 
 
 @app.on_message(filters.command(["config", "botconfig"]) & ~app.bl_users)
@@ -76,7 +292,9 @@ async def _settings(_, m: types.Message):
             "<code>/config lang_code en</code>\n"
             "<code>/config owner_id 123456789</code>\n"
             "<code>/config default_thumb https://example.com/thumb.jpg</code>\n"
-            "<code>/config ping_img https://example.com/ping.jpg</code>\n"
+            "<code>/config ping_img https://example.com/ping.jpg</code>\n\n"
+            "Use <code>/refreshconfig</code> to reload the deployment <code>.env</code>, "
+            "database overrides, and language files without restarting."
         )
         await m.reply_text(text)
         return
@@ -204,10 +422,7 @@ async def _reset_setting(_, m: types.Message):
             "❌ Invalid setting key. Available keys: auto_leave, auto_end, thumb_gen, video_play, lang_code, default_thumb, ping_img, start_img"
         )
     
-    # Get the original env value (reload from Config defaults)
-    from config import Config as OriginalConfig
-    original_config = OriginalConfig()
-    original_value = getattr(original_config, key, None)
+    original_value = config._runtime_defaults.get(key)
     
     # Delete from MongoDB
     await db.delete_config(key)

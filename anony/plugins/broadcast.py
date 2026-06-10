@@ -3,101 +3,210 @@
 # This file is part of AnonXMusic
 
 
-import os
 import asyncio
+import time
 from pathlib import Path
 
 from pyrogram import errors, filters, types
 
-from anony import app, db, lang
+from anony import app, db, lang, logger
 
 
-broadcasting = False
+FLOOD_RETRIES = 3
+PROGRESS_INTERVAL = 5
+SEND_DELAY = 0.15
+broadcast_state = None
+
+
+def progress_text(state: dict, *, paused_for: int | None = None) -> str:
+    processed = state["processed"]
+    total = state["total"]
+    percent = int(processed * 100 / total) if total else 100
+    elapsed = max(time.monotonic() - state["started"], 0.1)
+    rate = processed / elapsed
+    remaining = total - processed
+    eta = int(remaining / rate) if rate else 0
+    text = (
+        "<b>📣 Broadcast in progress</b>\n\n"
+        f"📬 Progress: <code>{processed}/{total}</code> ({percent}%)\n"
+        f"✅ Delivered: <code>{state['delivered']}</code>\n"
+        f"❌ Failed: <code>{state['failed']}</code>\n"
+        f"⏱️ Elapsed: <code>{int(elapsed)}s</code>\n"
+        f"🕒 Estimated remaining: <code>{eta}s</code>"
+    )
+    if paused_for is not None:
+        text += (
+            "\n\n🚦 Telegram asked the bot to slow down.\n"
+            f"⏳ Retrying the current recipient in <code>{paused_for}s</code>."
+        )
+    return text + "\n\n🛑 Use <code>/stop_broadcast</code> to cancel."
+
+
+async def update_progress(state: dict, *, force: bool = False, paused_for: int | None = None) -> None:
+    now = time.monotonic()
+    if not force and paused_for is None and now - state["last_update"] < PROGRESS_INTERVAL:
+        return
+    try:
+        await state["status"].edit_text(progress_text(state, paused_for=paused_for))
+        state["last_update"] = now
+    except errors.MessageNotModified:
+        pass
+    except Exception:
+        logger.debug("Could not update broadcast progress", exc_info=True)
+
+
+async def interruptible_wait(stop_event: asyncio.Event, seconds: float) -> bool:
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+        return False
+    except asyncio.TimeoutError:
+        return True
+
+
+async def send_to_recipient(msg: types.Message, chat_id: int, copy: bool, state: dict) -> tuple[bool, str | None]:
+    for attempt in range(FLOOD_RETRIES + 1):
+        if state["stop_event"].is_set():
+            return False, "Broadcast cancelled before delivery."
+        try:
+            if copy:
+                await msg.copy(chat_id, reply_markup=msg.reply_markup)
+            else:
+                await msg.forward(chat_id)
+            return True, None
+        except (errors.FloodWait, errors.FloodPremiumWait) as flood:
+            if attempt >= FLOOD_RETRIES:
+                return False, f"Flood wait remained after {FLOOD_RETRIES} retries."
+            wait = max(int(flood.value), 1) + 1
+            await update_progress(state, force=True, paused_for=wait)
+            if not await interruptible_wait(state["stop_event"], wait):
+                return False, "Broadcast cancelled during flood wait."
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+    return False, "Delivery retries exhausted."
+
+
+async def log_broadcast_start(message: types.Message, msg: types.Message) -> None:
+    try:
+        await msg.forward(app.logger)
+        log_message = await app.send_message(
+            chat_id=app.logger,
+            text=message.lang["gcast_log"].format(
+                message.from_user.id,
+                message.from_user.mention,
+                message.text,
+            ),
+        )
+        await log_message.pin(disable_notification=False)
+    except Exception:
+        logger.exception("Could not write broadcast start log")
+
 
 @app.on_message(filters.command(["broadcast"]) & app.sudoers)
 @lang.language()
 async def _broadcast(_, message: types.Message):
-    global broadcasting
+    global broadcast_state
     if not message.reply_to_message:
-        return await message.reply_text(message.lang["gcast_usage"])
-
-    if broadcasting:
-        return await message.reply_text(message.lang["gcast_active"])
-
-    msg = message.reply_to_message
-    count, ucount = 0, 0
-    chats, groups, users = [], [], []
-    sent = await message.reply_text(message.lang["gcast_start"])
-
-    if "-nochat" not in message.command:
-        groups.extend(await db.get_chats())
-    if "-user" in message.command:
-        users.extend(await db.get_users())
-
-    chats.extend(groups + users)
-    broadcasting = True
-
-    await msg.forward(app.logger)
-    await (await app.send_message(
-        chat_id=app.logger, 
-        text=message.lang["gcast_log"].format(
-            message.from_user.id,
-            message.from_user.mention,
-            message.text,
+        return await message.reply_text(
+            "📣 Reply to the message you want to broadcast.\n\n"
+            "💡 Add <code>-user</code> to include users, <code>-nochat</code> to exclude groups, "
+            "or <code>-copy</code> to remove the forwarded label."
         )
-    )).pin(disable_notification=False)
-    await asyncio.sleep(5)
+    if broadcast_state:
+        return await message.reply_text(
+            progress_text(broadcast_state)
+            + "\n\n⚠️ Only one broadcast can run at a time."
+        )
 
-    failed = ""
-    for chat in chats:
-        if not broadcasting:
-            await sent.edit_text(message.lang["gcast_stopped"].format(count, ucount))
-            break
+    status = await message.reply_text("🔎 Collecting broadcast recipients...")
+    groups = list(await db.get_chats()) if "-nochat" not in message.command else []
+    users = list(await db.get_users()) if "-user" in message.command else []
+    group_ids = set(groups)
+    recipients = list(dict.fromkeys(groups + users))
+    if not recipients:
+        return await status.edit_text(
+            "📭 No recipients matched this broadcast.\n\n"
+            "💡 Include groups or add <code>-user</code> to include served users."
+        )
 
-        try:
-            (
-                await msg.copy(chat, reply_markup=msg.reply_markup)
-                if "-copy" in message.text
-                else await msg.forward(chat)
+    state = {
+        "status": status,
+        "stop_event": asyncio.Event(),
+        "started": time.monotonic(),
+        "last_update": 0.0,
+        "total": len(recipients),
+        "processed": 0,
+        "delivered": 0,
+        "failed": 0,
+        "groups": 0,
+        "users": 0,
+        "errors": [],
+    }
+    broadcast_state = state
+    await update_progress(state, force=True)
+    await log_broadcast_start(message, message.reply_to_message)
+
+    try:
+        for chat_id in recipients:
+            if state["stop_event"].is_set():
+                break
+            delivered, error = await send_to_recipient(
+                message.reply_to_message,
+                chat_id,
+                "-copy" in message.command,
+                state,
             )
-            if chat in groups:
-                count += 1
+            if state["stop_event"].is_set() and not delivered:
+                break
+            state["processed"] += 1
+            if delivered:
+                state["delivered"] += 1
+                if chat_id in group_ids:
+                    state["groups"] += 1
+                else:
+                    state["users"] += 1
             else:
-                ucount += 1
-            await asyncio.sleep(0.1)
-        except errors.FloodWait as fw:
-            await asyncio.sleep(fw.value + 30)
-        except Exception as ex:
-            failed += f"{chat} - {ex}\n"
-            continue
-
-    text = message.lang["gcast_end"].format(count, ucount)
-    if failed:
-        temp_file = Path.cwd() / "cache" / "errors.txt"
-        temp_file.parent.mkdir(parents=True, exist_ok=True)
-        temp_file.write_text(failed, encoding="utf-8")
-        await message.reply_document(
-            document=str(temp_file),
-            caption=text,
+                state["failed"] += 1
+                state["errors"].append(f"{chat_id} - {error}")
+            await update_progress(state)
+            if not await interruptible_wait(state["stop_event"], SEND_DELAY):
+                break
+    finally:
+        cancelled = state["stop_event"].is_set()
+        elapsed = int(time.monotonic() - state["started"])
+        summary = (
+            f"{'🛑 Broadcast cancelled.' if cancelled else '✅ Broadcast completed.'}\n\n"
+            f"📬 Processed: <code>{state['processed']}/{state['total']}</code>\n"
+            f"👥 Groups reached: <code>{state['groups']}</code>\n"
+            f"👤 Users reached: <code>{state['users']}</code>\n"
+            f"❌ Failed: <code>{state['failed']}</code>\n"
+            f"⏱️ Duration: <code>{elapsed}s</code>"
         )
-        temp_file.unlink(missing_ok=True)
-    broadcasting = False
-    await sent.edit_text(text)
+        try:
+            if state["errors"]:
+                error_file = Path.cwd() / "cache" / "broadcast-errors.txt"
+                error_file.parent.mkdir(parents=True, exist_ok=True)
+                error_file.write_text("\n".join(state["errors"]), encoding="utf-8")
+                try:
+                    await message.reply_document(str(error_file), caption=summary)
+                except Exception:
+                    logger.exception("Could not send broadcast error report")
+                finally:
+                    error_file.unlink(missing_ok=True)
+            try:
+                await status.edit_text(summary)
+            except Exception:
+                logger.exception("Could not send broadcast final summary")
+        finally:
+            broadcast_state = None
 
 
 @app.on_message(filters.command(["stop_gcast", "stop_broadcast"]) & app.sudoers)
 @lang.language()
 async def _stop_gcast(_, message: types.Message):
-    global broadcasting
-    if not broadcasting:
-        return await message.reply_text(message.lang["gcast_inactive"])
-
-    broadcasting = False
-    await (await app.send_message(
-        chat_id=app.logger,
-        text=message.lang["gcast_stop_log"].format(
-            message.from_user.id,
-            message.from_user.mention
-        )
-    )).pin(disable_notification=False)
-    await message.reply_text(message.lang["gcast_stop"])
+    if not broadcast_state:
+        return await message.reply_text("📭 There is no active broadcast to stop.")
+    broadcast_state["stop_event"].set()
+    await message.reply_text(
+        "🛑 Cancellation requested.\n\n"
+        "⏳ The broadcast worker is stopping now and will post its final delivery summary."
+    )

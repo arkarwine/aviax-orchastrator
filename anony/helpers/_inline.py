@@ -301,7 +301,12 @@ class Inline:
                     text=f"❔ {lang['help']}",
                     callback_data="help",
                     style=enums.ButtonStyle.PRIMARY,
-                )
+                ),
+                self.ikb(
+                    text=f"📊 {lang['help_7']}",
+                    callback_data="stats",
+                    style=enums.ButtonStyle.SUCCESS,
+                ),
             ],
             [
                 self.ikb(
@@ -337,6 +342,24 @@ class Inline:
                 ]
             ]
         return self.ikm(rows)
+
+    def stats_markup(self) -> types.InlineKeyboardMarkup:
+        return self.ikm(
+            [
+                [
+                    self.ikb(
+                        text="🔄 Refresh",
+                        callback_data="stats refresh",
+                        style=enums.ButtonStyle.SUCCESS,
+                    ),
+                    self.ikb(
+                        text="✖️ Close",
+                        callback_data="stats close",
+                        style=enums.ButtonStyle.DANGER,
+                    ),
+                ]
+            ]
+        )
 
     def yt_key(self, link: str) -> types.InlineKeyboardMarkup:
         return self.ikm(

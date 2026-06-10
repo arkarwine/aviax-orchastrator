@@ -12,6 +12,37 @@ from anony import anon, app, config, db, lang, queue, tasks, userbot, yt
 from anony.helpers import buttons
 
 
+optional_tasks = {}
+
+
+def _start_optional_task(name: str, coroutine) -> None:
+    task = asyncio.create_task(coroutine)
+    optional_tasks[name] = task
+    tasks.append(task)
+
+
+async def sync_optional_tasks() -> None:
+    desired = {
+        "auto_end": (config.AUTO_END, vc_watcher),
+        "auto_leave": (config.AUTO_LEAVE, auto_leave),
+    }
+    for name, (enabled, factory) in desired.items():
+        task = optional_tasks.get(name)
+        if enabled and (not task or task.done()):
+            if task in tasks:
+                tasks.remove(task)
+            _start_optional_task(name, factory())
+        elif not enabled and task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            optional_tasks.pop(name, None)
+            if task in tasks:
+                tasks.remove(task)
+
+
 @app.on_message(filters.video_chat_started, group=19)
 @app.on_message(filters.video_chat_ended, group=20)
 async def _watcher_vc(_, m: types.Message):
@@ -122,8 +153,8 @@ async def vc_watcher(sleep=15):
 
 
 if config.AUTO_END:
-    tasks.append(asyncio.create_task(vc_watcher()))
+    _start_optional_task("auto_end", vc_watcher())
 if config.AUTO_LEAVE:
-    tasks.append(asyncio.create_task(auto_leave()))
+    _start_optional_task("auto_leave", auto_leave())
 tasks.append(asyncio.create_task(track_time()))
 tasks.append(asyncio.create_task(update_timer()))
