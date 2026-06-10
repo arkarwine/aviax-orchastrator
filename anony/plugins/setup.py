@@ -212,7 +212,8 @@ async def _set_lang_code(_, m: types.Message):
 @app.on_message(filters.command(["addsession"]) & filters.private & ~app.bl_users)
 @lang.language()
 async def _add_session_start(_, m: types.Message):
-    await begin_session_setup(m)
+    parts = (m.text or "").split(maxsplit=1)
+    await begin_session_setup(m, parts[1].strip() if len(parts) > 1 else None)
 
 
 @app.on_message(filters.command(["editsession", "setsession"]) & filters.private & ~app.bl_users)
@@ -282,7 +283,7 @@ async def _edit_session(_, m: types.Message):
     )
 
 
-async def begin_session_setup(m: types.Message):
+async def begin_session_setup(m: types.Message, session_string: str | None = None):
     if not is_owner(m.from_user.id):
         return await m.reply_text("🔒 Only the deployment owner can add assistant sessions.")
     if not config.LOGGER_ID:
@@ -292,9 +293,46 @@ async def begin_session_setup(m: types.Message):
     if all([config.SESSION1, config.SESSION2, config.SESSION3]):
         return await m.reply_text("✅ All three assistant session slots are already configured.")
 
-    session_setup[m.from_user.id] = {"step": "phone"}
+    if session_string:
+        return await _import_session_string(m, session_string)
+
     await m.reply_text(
-        "📱 Send the assistant account phone number in international format, for example <code>+959123456789</code>.\n\n"
+        "<b>🔐 Connect an assistant account</b>\n\n"
+        "Choose how you want to connect the assistant account.",
+        reply_markup=buttons.session_setup_method(),
+    )
+
+
+@app.on_callback_query(filters.regex(r"^setup_session (phone|string|cancel)$") & ~app.bl_users)
+async def _choose_session_setup_method(_, query: types.CallbackQuery):
+    if not is_owner(query.from_user.id):
+        return await query.answer(
+            "Only the deployment owner can add assistant sessions.",
+            show_alert=True,
+        )
+    if all([config.SESSION1, config.SESSION2, config.SESSION3]):
+        return await query.answer(
+            "All three assistant session slots are already configured.",
+            show_alert=True,
+        )
+
+    method = query.data.split()[1]
+    if method == "cancel":
+        session_setup.pop(query.from_user.id, None)
+        await query.answer("Session setup cancelled.")
+        return await query.message.edit_text("🛑 Session setup cancelled.")
+
+    session_setup[query.from_user.id] = {"step": method}
+    await query.answer()
+    if method == "phone":
+        return await query.message.edit_text(
+            "📱 Send the assistant account phone number in international format, "
+            "for example <code>+959123456789</code>.\n\n"
+            "🛑 Send /cancel anytime to stop."
+        )
+    await query.message.edit_text(
+        "🔑 Send the existing Pyrogram user-account session string.\n\n"
+        "🔒 Your message will be deleted immediately before the session is validated.\n\n"
         "🛑 Send /cancel anytime to stop."
     )
 
@@ -324,7 +362,16 @@ async def _session_setup_text(_, m: types.Message):
     if text.startswith("/"):
         return
 
+    if state["step"] == "string":
+        session_setup.pop(m.from_user.id, None)
+        return await _import_session_string(m, text)
+
     if state["step"] == "phone":
+        if not text.startswith("+") or not text[1:].isdigit():
+            return await m.reply_text(
+                "❌ That does not look like an international phone number.\n\n"
+                "💡 Send it with the country code, for example <code>+959123456789</code>."
+            )
         status = await m.reply_text("🔌 Connecting to Telegram...")
         client = Client(
             name=f"session-gen-{m.from_user.id}",
@@ -405,6 +452,47 @@ async def _session_setup_text(_, m: types.Message):
         return await _finish_session(m, client, status)
 
 
+async def _import_session_string(m: types.Message, session_string: str) -> None:
+    session_string = session_string.strip()
+    if not session_string:
+        return await m.reply_text("❌ The session string cannot be empty.")
+
+    try:
+        await m.delete()
+    except Exception:
+        pass
+
+    status = await app.send_message(m.chat.id, "🔎 Validating assistant session string...")
+    client = Client(
+        name=f"session-import-{m.from_user.id}",
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        session_string=session_string,
+        in_memory=True,
+    )
+    started = False
+    try:
+        await client.start()
+        started = True
+        assistant = await client.get_me()
+    except Exception:
+        logger.exception("Could not validate imported assistant session")
+        return await status.edit_text(
+            "❌ That session string could not be validated.\n\n"
+            "💡 Make sure it is a valid Pyrogram user-account session string, then try again."
+        )
+    finally:
+        if started:
+            try:
+                await client.stop()
+            except Exception:
+                logger.exception("Could not stop imported assistant session validation client")
+
+    assistant_name = escape(assistant.first_name or assistant.username or str(assistant.id))
+    await status.edit_text(f"✅ Session validated for <b>{assistant_name}</b>.\n\n💾 Saving assistant session...")
+    await _save_session_string(m, session_string, status)
+
+
 async def _finish_session(m: types.Message, client: Client, status: types.Message | None = None) -> None:
     status = status or await m.reply_text("💾 Saving assistant session...")
     await status.edit_text("📤 Exporting assistant session...")
@@ -420,6 +508,14 @@ async def _finish_session(m: types.Message, client: Client, status: types.Messag
         )
     await client.disconnect()
 
+    await _save_session_string(m, session_string, status)
+
+
+async def _save_session_string(
+    m: types.Message,
+    session_string: str,
+    status: types.Message,
+) -> None:
     slot = next(
         num
         for num, value in enumerate((config.SESSION1, config.SESSION2, config.SESSION3), start=1)

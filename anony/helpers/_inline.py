@@ -173,6 +173,31 @@ class Inline:
             ]
         )
 
+    def session_setup_method(self) -> types.InlineKeyboardMarkup:
+        return self.ikm(
+            [
+                [
+                    self.ikb(
+                        text="📱 Phone Number",
+                        callback_data="setup_session phone",
+                        style=enums.ButtonStyle.PRIMARY,
+                    ),
+                    self.ikb(
+                        text="🔑 Session String",
+                        callback_data="setup_session string",
+                        style=enums.ButtonStyle.SUCCESS,
+                    ),
+                ],
+                [
+                    self.ikb(
+                        text="✖️ Cancel",
+                        callback_data="setup_session cancel",
+                        style=enums.ButtonStyle.DANGER,
+                    )
+                ],
+            ]
+        )
+
     def play_queued(
         self, chat_id: int, item_id: str, _text: str
     ) -> types.InlineKeyboardMarkup:
