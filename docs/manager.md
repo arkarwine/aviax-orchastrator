@@ -31,16 +31,29 @@ pm2 start "python3 manager.py" --name world
 ## Commands
 
 ```text
-/newbot <name> <bot_token> [owner_id]
+/newbot <name> <bot_token> [owner_id] [database_name]
+/reconfigure <name> <bot_token> [owner_id]
 /list
 /status <name>
 /deploy <name>
 /stop <name>
 /delete <name>
-/restart
+/restart <name>
 ```
 
 `/delete` stops the deployment if needed, permanently removes its deployment directory, and removes it from the manager store.
+
+`/newbot` generates an isolated database name by default. To manually choose one, provide it after the owner ID or directly after the bot token when no owner ID is needed. Use `-` as the owner placeholder for a numeric database name:
+
+```text
+/newbot music_bot <bot_token> music_database
+/newbot music_bot <bot_token> 123456789 music_database
+/newbot music_bot <bot_token> - 12345
+```
+
+`/reconfigure` verifies a new bot token, rebuilds the existing deployment configuration, and restarts it while preserving its MongoDB connection, `DB_NAME`, `DEPLOYMENT_ID`, and stored setup data.
+
+`/restart <name>` restarts only the specified deployed bot. It does not restart the manager.
 
 ## Deployment Setup Flow
 

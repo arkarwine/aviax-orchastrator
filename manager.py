@@ -201,6 +201,14 @@ def normalize_name(value: str) -> str:
     return normalized.strip("_") or "bot"
 
 
+def validate_database_name(value: str) -> Optional[str]:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        return "Use only letters, numbers, underscores, and hyphens."
+    if len(value.encode("utf-8")) > 63:
+        return "Keep the database name at 63 bytes or fewer."
+    return None
+
+
 def env_from_template(**values: str) -> Dict[str, str]:
     env = {
         "API_ID": str(values["api_id"]),
@@ -263,6 +271,7 @@ class BotManager:
         self.app.on_message(filters.private & filters.command("start") & filters.user(self.config.owner_id))(self.start)
         self.app.on_message(filters.private & filters.command("help") & filters.user(self.config.owner_id))(self.help)
         self.app.on_message(filters.private & filters.command("newbot") & filters.user(self.config.owner_id))(self.newbot)
+        self.app.on_message(filters.private & filters.command(["reconfigure", "rebuild"]) & filters.user(self.config.owner_id))(self.reconfigure)
         self.app.on_message(filters.private & filters.command("list") & filters.user(self.config.owner_id))(self.list_bots)
         self.app.on_message(filters.private & filters.command("status") & filters.user(self.config.owner_id))(self.status)
         self.app.on_message(filters.private & filters.command("deploy") & filters.user(self.config.owner_id))(self.deploy)
@@ -282,13 +291,14 @@ class BotManager:
     async def help(self, client: Client, message: Message) -> None:
         await message.reply_text(
             "<b>🧰 Manager Commands</b>\n"
-            "➕ /newbot &lt;name&gt; &lt;bot_token&gt; [owner_id] - Create and start a deployment.\n"
+            "➕ /newbot &lt;name&gt; &lt;bot_token&gt; [owner_id] [database_name] - Create and start a deployment.\n"
+            "🧰 /reconfigure &lt;name&gt; &lt;bot_token&gt; [owner_id] - Reconfigure a deployment while preserving its database.\n"
             "📋 /list - Show all deployments.\n"
             "🔎 /status &lt;name&gt; - Show deployment status.\n"
             "▶️ /deploy &lt;name&gt; - Start a stopped deployment.\n"
             "⏹️ /stop &lt;name&gt; - Stop a running deployment.\n"
             "🗑️ /delete &lt;name&gt; - Permanently delete a deployment.\n"
-            "🔄 /restart - Restart the manager bot.\n",
+            "🔄 /restart &lt;name&gt; - Restart a deployed bot.\n",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
 
@@ -446,36 +456,102 @@ class BotManager:
 
     @handler_errors
     async def restart(self, client: Client, message: Message) -> None:
-        await message.reply_text(
-            "🔄 Restarting manager bot...",
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            return await message.reply_text(
+                "🔄 Usage: <code>/restart &lt;name&gt;</code>\n\n"
+                "💡 Use <code>/list</code> to check registered deployment names.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        name = normalize_name(args[1])
+        deployment = self.store.get(name)
+        if not deployment:
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> was not found.\n\n"
+                "💡 Use <code>/list</code> to check registered deployment names.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        status = await message.reply_text(
+            f"🔄 Restarting deployment <b>{name}</b>...",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
-        self.shutdown_event.set()
-        try:
-            self.app.stop()
-        except Exception:
-            pass
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        if deployment.is_running:
+            await status.edit_text(f"⏹️ Stopping deployment <b>{name}</b>...")
+            stopped, error = self.stop_process(deployment)
+            if not stopped:
+                logger.error("Failed to stop deployment %s for restart: %s", name, error)
+                return await status.edit_text(
+                    f"❌ Deployment <b>{name}</b> could not be stopped, so it was not restarted.\n\n"
+                    f"💡 Run <code>/stop {name}</code>, review the manager logs, then try again."
+                )
+            self.store.update(deployment)
+        elif deployment.pid:
+            deployment.pid = None
+            self.processes.pop(deployment.name, None)
+            self.store.update(deployment)
+
+        await status.edit_text(f"🚀 Starting deployment <b>{name}</b>...")
+        started, error = self.start_process(deployment)
+        if not started:
+            self.store.update(deployment)
+            logger.error("Failed to restart deployment %s: %s", name, error)
+            return await status.edit_text(
+                f"❌ Deployment <b>{name}</b> stopped but could not start again.\n\n"
+                f"💡 Check its <code>run.log</code>, then run <code>/deploy {name}</code>."
+            )
+
+        deployment.started_at = datetime.now(timezone.utc).isoformat()
+        self.store.update(deployment)
+        await status.edit_text(
+            f"✅ Deployment <b>{name}</b> restarted successfully.\n"
+            f"PID: <code>{deployment.pid}</code>"
+        )
 
     @handler_errors
     async def newbot(self, client: Client, message: Message) -> None:
-        args = message.text.split(maxsplit=3)
+        args = message.text.split(maxsplit=4)
         if len(args) < 3:
             return await message.reply_text(
-                "➕ Usage: /newbot &lt;name&gt; &lt;bot_token&gt; [owner_id]",
+                "➕ Usage: /newbot &lt;name&gt; &lt;bot_token&gt; [owner_id] [database_name]\n\n"
+                "💡 To set a database name without an owner ID, provide the database name directly.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
         name = normalize_name(args[1])
         bot_token = args[2].strip()
-        owner_id = args[3].strip() if len(args) > 3 else ""
+        owner_id = ""
+        requested_db_name = ""
+        if len(args) > 3:
+            optional_value = args[3].strip()
+            if optional_value.isdigit():
+                owner_id = optional_value
+                requested_db_name = args[4].strip() if len(args) > 4 else ""
+            elif optional_value == "-":
+                requested_db_name = args[4].strip() if len(args) > 4 else ""
+            else:
+                requested_db_name = optional_value
+                if len(args) > 4:
+                    return await message.reply_text(
+                        "❌ I could not understand the optional arguments.\n\n"
+                        "💡 Use <code>/newbot &lt;name&gt; &lt;token&gt; [owner_id] [database_name]</code>."
+                    )
         mongo_url = self.config.default_mongo_url
         logger.info("Received newbot request for %s", name)
 
-        if owner_id and not owner_id.isdigit():
+        if requested_db_name:
+            database_error = validate_database_name(requested_db_name)
+            if database_error:
+                return await message.reply_text(
+                    f"❌ Invalid database name <code>{requested_db_name}</code>.\n\n"
+                    f"💡 {database_error}",
+                    reply_parameters=ReplyParameters(message_id=message.id),
+                )
+        elif len(args) > 3 and args[3].strip() == "-":
             return await message.reply_text(
-                "❌ Owner ID must be numeric.\n\n"
-                "💡 Send only the Telegram user ID, for example <code>123456789</code>.",
+                "❌ A database name is required after the owner placeholder.\n\n"
+                "💡 Example: <code>/newbot music_bot token - music_database</code>",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
@@ -488,7 +564,11 @@ class BotManager:
             )
 
         if name in self.store.list():
-            return await message.reply_text(f"⚠️ A deployment named <b>{name}</b> already exists.\n\n💡 Choose another name or delete the existing deployment first.", reply_parameters=ReplyParameters(message_id=message.id))
+            return await message.reply_text(
+                f"⚠️ A deployment named <b>{name}</b> already exists.\n\n"
+                f"💡 Use <code>/reconfigure {name} &lt;bot_token&gt;</code> to run the deployment setup again while preserving its database.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
 
         status = await message.reply_text(f"🔎 Verifying the bot token for <b>{name}</b>...", reply_parameters=ReplyParameters(message_id=message.id))
 
@@ -513,7 +593,7 @@ class BotManager:
             manager_downloads_path = str((ROOT / manager_downloads_path).resolve())
 
         deployment_id = uuid.uuid4().hex
-        db_name = normalize_name(f"{name}_{bot_user.id}_{deployment_id[:8]}")
+        db_name = requested_db_name or normalize_name(f"{name}_{bot_user.id}_{deployment_id[:8]}")
         env_vars = env_from_template(
             api_id=self.config.api_id,
             api_hash=self.config.api_hash,
@@ -566,6 +646,148 @@ class BotManager:
                 f"⚠️ Deployment <b>{name}</b> was created, but it could not start.\n\n"
                 "💡 Check its <code>run.log</code>, dependencies, and generated <code>.env</code>, then use /deploy."
             )
+
+    @handler_errors
+    async def reconfigure(self, client: Client, message: Message) -> None:
+        args = message.text.split(maxsplit=3)
+        if len(args) < 3:
+            return await message.reply_text(
+                "🧰 Usage: /reconfigure &lt;name&gt; &lt;bot_token&gt; [owner_id]\n\n"
+                "💾 The existing database, deployment identity, and stored bot setup will be preserved.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        name = normalize_name(args[1])
+        bot_token = args[2].strip()
+        owner_id = args[3].strip() if len(args) > 3 else ""
+        deployment = self.store.get(name)
+        if not deployment:
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> was not found.\n\n"
+                "💡 Use <code>/newbot</code> to create a new deployment or <code>/list</code> to check registered names.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        if owner_id and not owner_id.isdigit():
+            return await message.reply_text(
+                "❌ Owner ID must be numeric.\n\n"
+                "💡 Send only the Telegram user ID, for example <code>123456789</code>.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        if not deployment.db_name or not deployment.deployment_id:
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> does not have a stored database identity.\n\n"
+                "💡 Restore its <code>db_name</code> and <code>deployment_id</code> in the manager deployment record before reconfiguring it.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        status = await message.reply_text(
+            f"🔎 Verifying the new bot token for <b>{name}</b>...",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+        try:
+            bot_user = await self.verify_bot_token(bot_token)
+        except Exception:
+            logger.exception("Replacement bot token verification failed for %s", name)
+            return await status.edit_text(
+                "❌ I could not verify that bot token.\n\n"
+                "💡 Copy a fresh token from @BotFather, make sure it belongs to a bot, then try again."
+            )
+
+        env_path = deployment.deployment_path / ".env"
+        if not env_path.exists():
+            return await status.edit_text(
+                f"❌ Deployment <b>{name}</b> is missing its <code>.env</code> file.\n\n"
+                "💡 Restore the deployment files before reconfiguring it. Its database was not changed."
+            )
+        env_vars = self.load_deployment_env(env_path)
+        mongo_url = env_vars.get("MONGO_URL")
+        if not mongo_url:
+            return await status.edit_text(
+                f"❌ Deployment <b>{name}</b> does not have a stored MongoDB connection.\n\n"
+                "💡 Restore <code>MONGO_URL</code> in its <code>.env</code>, then try again. Its database was not changed."
+            )
+
+        await status.edit_text(f"⏹️ Stopping deployment <b>{name}</b> safely...")
+        if deployment.is_running:
+            stopped, error = self.stop_process(deployment)
+            if not stopped:
+                logger.error("Could not stop deployment %s before reconfiguration: %s", name, error)
+                return await status.edit_text(
+                    f"❌ Deployment <b>{name}</b> could not be stopped, so no settings were changed.\n\n"
+                    f"💡 Run <code>/stop {name}</code>, then try <code>/reconfigure</code> again."
+                )
+            self.store.update(deployment)
+        elif deployment.pid:
+            deployment.pid = None
+            self.processes.pop(deployment.name, None)
+            self.store.update(deployment)
+
+        await status.edit_text(f"💾 Updating deployment <b>{name}</b> while preserving its database...")
+        env_vars.update(
+            {
+                "API_ID": str(self.config.api_id),
+                "API_HASH": self.config.api_hash,
+                "BOT_TOKEN": bot_token,
+                "MONGO_URL": mongo_url,
+                "DB_NAME": deployment.db_name,
+                "DEPLOYMENT_ID": deployment.deployment_id,
+                "MANAGED_SETUP": "True",
+                "SESSION_PATH": str(deployment.deployment_path),
+                "NAME": deployment.name,
+            }
+        )
+        if self.config.api_key:
+            env_vars["API_KEY"] = self.config.api_key
+        if owner_id:
+            env_vars["OWNER_ID"] = owner_id
+
+        env_tmp_path = env_path.with_name(".env.tmp")
+        try:
+            env_tmp_path.write_text(
+                "\n".join(f"{key}={value}" for key, value in env_vars.items()),
+                encoding="utf-8",
+            )
+            env_tmp_path.replace(env_path)
+        except Exception:
+            logger.exception("Could not update deployment environment for %s", name)
+            return await status.edit_text(
+                f"❌ I could not update deployment <b>{name}</b>.\n\n"
+                "💡 Check the deployment directory permissions and try again. Its database was not changed."
+            )
+
+        await status.edit_text(f"🔐 Refreshing the bot login for <b>{name}</b>...")
+        try:
+            for filename in ("Anony.session", "Anony.session-journal"):
+                (deployment.deployment_path / filename).unlink(missing_ok=True)
+        except Exception:
+            logger.exception("Could not refresh bot login session for %s", name)
+            return await status.edit_text(
+                f"❌ Deployment <b>{name}</b> was updated, but its old bot login could not be cleared.\n\n"
+                "💡 Check the deployment directory permissions, then run <code>/reconfigure</code> again. Its database was not changed."
+            )
+
+        deployment.bot_id = bot_user.id
+        deployment.username = f"@{bot_user.username}" if bot_user.username else bot_user.first_name
+        await status.edit_text(f"🚀 Starting reconfigured deployment <b>{name}</b>...")
+        started, error = self.start_process(deployment)
+        if not started:
+            self.store.update(deployment)
+            logger.error("Reconfigured deployment %s could not start: %s", name, error)
+            return await status.edit_text(
+                f"⚠️ Deployment <b>{name}</b> was reconfigured but could not start.\n\n"
+                f"💾 Database <code>{deployment.db_name}</code> was preserved.\n"
+                f"💡 Check its <code>run.log</code>, then run <code>/deploy {name}</code>."
+            )
+
+        deployment.started_at = datetime.now(timezone.utc).isoformat()
+        self.store.update(deployment)
+        await status.edit_text(
+            f"✅ Deployment <b>{name}</b> reconfigured and started.\n"
+            f"Bot: <code>{deployment.username}</code>\n"
+            f"DB: <code>{deployment.db_name}</code> preserved\n"
+            f"Deployment ID: <code>{deployment.deployment_id}</code> preserved\n\n"
+            "✨ Existing setup and stored data remain available."
+        )
 
     async def verify_bot_token(self, bot_token: str):
         logger.info("Verifying bot token with temporary client.")

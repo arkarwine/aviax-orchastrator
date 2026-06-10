@@ -3,7 +3,7 @@
 # This file is part of AnonXMusic
 
 
-from pyrogram import types
+from pyrogram import enums, types
 
 from anony import app, config, lang
 from anony.core.lang import lang_codes
@@ -15,7 +15,9 @@ class Inline:
         self.ikb = types.InlineKeyboardButton
 
     def cancel_dl(self, text) -> types.InlineKeyboardMarkup:
-        return self.ikm([[self.ikb(text=text, callback_data=f"cancel_dl")]])
+        return self.ikm(
+            [[self.ikb(text=text, callback_data="cancel_dl", style=enums.ButtonStyle.DANGER)]]
+        )
 
     def controls(
         self,
@@ -27,21 +29,49 @@ class Inline:
         keyboard = []
         if status:
             keyboard.append(
-                [self.ikb(text=status, callback_data=f"controls status {chat_id}")]
+                [
+                    self.ikb(
+                        text=status,
+                        callback_data=f"controls status {chat_id}",
+                        style=enums.ButtonStyle.PRIMARY,
+                    )
+                ]
             )
         elif timer:
             keyboard.append(
-                [self.ikb(text=timer, callback_data=f"controls status {chat_id}")]
+                [
+                    self.ikb(
+                        text=timer,
+                        callback_data=f"controls status {chat_id}",
+                        style=enums.ButtonStyle.PRIMARY,
+                    )
+                ]
             )
 
         if not remove:
             keyboard.append(
                 [
-                    self.ikb(text="▷", callback_data=f"controls resume {chat_id}"),
-                    self.ikb(text="II", callback_data=f"controls pause {chat_id}"),
+                    self.ikb(
+                        text="▷",
+                        callback_data=f"controls resume {chat_id}",
+                        style=enums.ButtonStyle.SUCCESS,
+                    ),
+                    self.ikb(
+                        text="II",
+                        callback_data=f"controls pause {chat_id}",
+                        style=enums.ButtonStyle.PRIMARY,
+                    ),
                     self.ikb(text="⥁", callback_data=f"controls replay {chat_id}"),
-                    self.ikb(text="‣‣I", callback_data=f"controls skip {chat_id}"),
-                    self.ikb(text="▢", callback_data=f"controls stop {chat_id}"),
+                    self.ikb(
+                        text="‣‣I",
+                        callback_data=f"controls skip {chat_id}",
+                        style=enums.ButtonStyle.PRIMARY,
+                    ),
+                    self.ikb(
+                        text="▢",
+                        callback_data=f"controls stop {chat_id}",
+                        style=enums.ButtonStyle.DANGER,
+                    ),
                 ]
             )
         return self.ikm(keyboard)
@@ -55,8 +85,16 @@ class Inline:
         if back:
             rows = [
                 [
-                    self.ikb(text=f"↩️ {_lang['back']}", callback_data="help back"),
-                    self.ikb(text=f"✖️ {_lang['close']}", callback_data="help close"),
+                    self.ikb(
+                        text=f"↩️ {_lang['back']}",
+                        callback_data="help back",
+                        style=enums.ButtonStyle.PRIMARY,
+                    ),
+                    self.ikb(
+                        text=f"✖️ {_lang['close']}",
+                        callback_data="help close",
+                        style=enums.ButtonStyle.DANGER,
+                    ),
                 ]
             ]
         else:
@@ -83,7 +121,15 @@ class Inline:
                 "sudo": "👑",
             }
             buttons = [
-                self.ikb(text=f"{icons[cb]} {_lang[f'help_{i}']}", callback_data=f"help {cb}")
+                self.ikb(
+                    text=f"{icons[cb]} {_lang[f'help_{i}']}",
+                    callback_data=f"help {cb}",
+                    style=(
+                        enums.ButtonStyle.DANGER
+                        if cb == "sudo"
+                        else enums.ButtonStyle.PRIMARY
+                    ),
+                )
                 for i, cb in enumerate(cbs)
                 if cb != "sudo" or user_id == app.owner or (user_id is not None and user_id in app.sudoers)
             ]
@@ -98,6 +144,11 @@ class Inline:
             self.ikb(
                 text=f"{name} ({code}) {'✔️' if code == _lang else ''}",
                 callback_data=f"lang_change {code}",
+                style=(
+                    enums.ButtonStyle.SUCCESS
+                    if code == _lang
+                    else enums.ButtonStyle.DEFAULT
+                ),
             )
             for code, name in langs.items()
         ]
@@ -105,7 +156,9 @@ class Inline:
         return self.ikm(rows)
 
     def ping_markup(self, text: str) -> types.InlineKeyboardMarkup:
-        return self.ikm([[self.ikb(text=text, url=config.SUPPORT_CHAT)]])
+        return self.ikm(
+            [[self.ikb(text=text, url=config.SUPPORT_CHAT, style=enums.ButtonStyle.PRIMARY)]]
+        )
 
     def setup_next_session(self) -> types.InlineKeyboardMarkup:
         return self.ikm(
@@ -114,6 +167,7 @@ class Inline:
                     self.ikb(
                         text="➡️ Next: Assistant Session",
                         url=f"https://t.me/{app.username}?start=addsession",
+                        style=enums.ButtonStyle.SUCCESS,
                     )
                 ]
             ]
@@ -126,7 +180,9 @@ class Inline:
             [
                 [
                     self.ikb(
-                        text=_text, callback_data=f"controls force {chat_id} {item_id}"
+                        text=_text,
+                        callback_data=f"controls force {chat_id} {item_id}",
+                        style=enums.ButtonStyle.SUCCESS,
                     )
                 ]
             ]
@@ -137,7 +193,19 @@ class Inline:
     ) -> types.InlineKeyboardMarkup:
         _action = "pause" if playing else "resume"
         return self.ikm(
-            [[self.ikb(text=_text, callback_data=f"controls {_action} {chat_id} q")]]
+            [
+                [
+                    self.ikb(
+                        text=_text,
+                        callback_data=f"controls {_action} {chat_id} q",
+                        style=(
+                            enums.ButtonStyle.PRIMARY
+                            if playing
+                            else enums.ButtonStyle.SUCCESS
+                        ),
+                    )
+                ]
+            ]
         )
 
     def settings_markup(
@@ -149,22 +217,45 @@ class Inline:
                     self.ikb(
                         text=lang["play_mode"] + " ➜",
                         callback_data="settings",
+                        style=enums.ButtonStyle.PRIMARY,
                     ),
-                    self.ikb(text=admin_only, callback_data="settings play"),
+                    self.ikb(
+                        text=admin_only,
+                        callback_data="settings play",
+                        style=(
+                            enums.ButtonStyle.SUCCESS
+                            if admin_only
+                            else enums.ButtonStyle.DANGER
+                        ),
+                    ),
                 ],
                 [
                     self.ikb(
                         text=lang["cmd_delete"] + " ➜",
                         callback_data="settings",
+                        style=enums.ButtonStyle.PRIMARY,
                     ),
-                    self.ikb(text=cmd_delete, callback_data="settings delete"),
+                    self.ikb(
+                        text=cmd_delete,
+                        callback_data="settings delete",
+                        style=(
+                            enums.ButtonStyle.SUCCESS
+                            if cmd_delete
+                            else enums.ButtonStyle.DANGER
+                        ),
+                    ),
                 ],
                 [
                     self.ikb(
                         text=lang["language"] + " ➜",
                         callback_data="settings",
+                        style=enums.ButtonStyle.PRIMARY,
                     ),
-                    self.ikb(text=lang_codes[language], callback_data="language"),
+                    self.ikb(
+                        text=lang_codes[language],
+                        callback_data="language",
+                        style=enums.ButtonStyle.PRIMARY,
+                    ),
                 ],
             ]
         )
@@ -177,22 +268,49 @@ class Inline:
                 self.ikb(
                     text=f"➕ {lang['add_me']}",
                     url=f"https://t.me/{app.username}?startgroup=true",
+                    style=enums.ButtonStyle.SUCCESS,
                 )
             ],
-            [self.ikb(text=f"❔ {lang['help']}", callback_data="help")],
             [
-                self.ikb(text=f"💬 {lang['support']}", url=config.SUPPORT_CHAT),
-                self.ikb(text=f"📣 {lang['channel']}", url=config.SUPPORT_CHANNEL),
+                self.ikb(
+                    text=f"❔ {lang['help']}",
+                    callback_data="help",
+                    style=enums.ButtonStyle.PRIMARY,
+                )
+            ],
+            [
+                self.ikb(
+                    text=f"💬 {lang['support']}",
+                    url=config.SUPPORT_CHAT,
+                    style=enums.ButtonStyle.PRIMARY,
+                ),
+                self.ikb(
+                    text=f"📣 {lang['channel']}",
+                    url=config.SUPPORT_CHANNEL,
+                    style=enums.ButtonStyle.PRIMARY,
+                ),
             ],
         ]
         if private:
             rows += [
                 [
-                    self.ikb(text="👤 Owner", url=f"tg://user?id={app.owner}")
+                    self.ikb(
+                        text="👤 Owner",
+                        url=f"tg://user?id={app.owner}",
+                        style=enums.ButtonStyle.PRIMARY,
+                    )
                 ]
             ]
         else:
-            rows += [[self.ikb(text=f"🌍 {lang['language']}", callback_data="language")]]
+            rows += [
+                [
+                    self.ikb(
+                        text=f"🌍 {lang['language']}",
+                        callback_data="language",
+                        style=enums.ButtonStyle.PRIMARY,
+                    )
+                ]
+            ]
         return self.ikm(rows)
 
     def yt_key(self, link: str) -> types.InlineKeyboardMarkup:
@@ -200,7 +318,11 @@ class Inline:
             [
                 [
                     self.ikb(text="❐", copy_text=link),
-                    self.ikb(text="Youtube", url=link),
+                    self.ikb(
+                        text="Youtube",
+                        url=link,
+                        style=enums.ButtonStyle.DANGER,
+                    ),
                 ],
             ]
         )
