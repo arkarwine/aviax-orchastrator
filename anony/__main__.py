@@ -61,6 +61,18 @@ async def main():
     if (
         config.MANAGED_SETUP
         and config.DEPLOYMENT_ID
+        and stored_runtime_settings
+        and not stored_runtime_settings.get("DEPLOYMENT_ID")
+    ):
+        logger.warning(
+            "Runtime configuration has no deployment identity; adopting it for deployment %s.",
+            config.DEPLOYMENT_ID,
+        )
+        await db.set_config("DEPLOYMENT_ID", config.DEPLOYMENT_ID)
+        stored_runtime_settings["DEPLOYMENT_ID"] = config.DEPLOYMENT_ID
+    if (
+        config.MANAGED_SETUP
+        and config.DEPLOYMENT_ID
         and config.OWNER_ID
         and not stored_runtime_settings
     ):

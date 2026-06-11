@@ -326,7 +326,7 @@ class Inline:
                 [
                     self.ikb(
                         text="👤 Owner",
-                        url=f"tg://user?id={app.owner}",
+                        url=config.OWNER_LINK or f"tg://user?id={app.owner}",
                         style=enums.ButtonStyle.PRIMARY,
                     )
                 ]

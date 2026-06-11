@@ -22,9 +22,9 @@ class Userbot(Client):
         self.reload_from_config()
 
     def reload_from_config(self) -> None:
-        clients = {"one": "SESSION1", "two": "SESSION2", "three": "SESSION3"}
-        for key, string_key in clients.items():
-            name = f"AnonyUB{key[-1]}"
+        clients = (("one", "SESSION1"), ("two", "SESSION2"), ("three", "SESSION3"))
+        for num, (key, string_key) in enumerate(clients, start=1):
+            name = f"AnonyUB{num}"
             session = getattr(config, string_key)
             session_name = name
             if config.SESSION_PATH:
@@ -80,7 +80,7 @@ class Userbot(Client):
                 continue
 
             config.apply_runtime_config({key: session})
-            session_name = f"AnonyUB{attr[-1]}"
+            session_name = f"AnonyUB{num}"
             if config.SESSION_PATH:
                 session_name = str(Path(config.SESSION_PATH) / session_name)
             client = self.build_client(session_name, session)
@@ -108,10 +108,10 @@ class Userbot(Client):
         """
         Asynchronously stops the assistants.
         """
-        if config.SESSION1:
-            await self.one.stop()
-        if config.SESSION2:
-            await self.two.stop()
-        if config.SESSION3:
-            await self.three.stop()
+        for client in list(self.clients):
+            try:
+                await client.stop()
+            except Exception:
+                logger.exception("Could not stop assistant %s cleanly.", getattr(client, "name", "unknown"))
+        self.clients.clear()
         logger.info("Assistants stopped.")

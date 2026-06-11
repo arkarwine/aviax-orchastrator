@@ -25,7 +25,7 @@ class Config:
         "API_ID", "API_HASH", "NAME", "DB_NAME", "DEPLOYMENT_ID", "MANAGED_SETUP",
         "BOT_TOKEN", "MONGO_URL", "OWNER_ID", "LOGGER_ID", "DURATION_LIMIT",
         "QUEUE_LIMIT", "PLAYLIST_LIMIT", "SESSION1", "SESSION2", "SESSION3",
-        "SESSION_PATH", "DOWNLOADS_PATH", "SUPPORT_CHANNEL", "SUPPORT_CHAT",
+        "SESSION_PATH", "DOWNLOADS_PATH", "SUPPORT_CHANNEL", "SUPPORT_CHAT", "OWNER_LINK",
         "API_URL", "VIDEO_API_URL", "API_KEY", "AUTO_LEAVE", "AUTO_END",
         "THUMB_GEN", "VIDEO_PLAY", "LANG_CODE", "COOKIES_URL", "DEFAULT_THUMB",
         "PING_IMG", "START_IMG",
@@ -60,6 +60,7 @@ class Config:
 
         self.SUPPORT_CHANNEL = self.value("SUPPORT_CHANNEL", "https://t.me/fallenx")
         self.SUPPORT_CHAT = self.value("SUPPORT_CHAT", "https://t.me/DevilsHeavenMF")
+        self.OWNER_LINK = self.value("OWNER_LINK", "")
 
         self.API_URL = self.value("API_URL", "https://pvtz.nexgenbots.xyz")
         self.VIDEO_API_URL = self.value("VIDEO_API_URL", "https://api.video.nexgenbots.xyz")
@@ -93,6 +94,7 @@ class Config:
             "DEFAULT_THUMB": self.DEFAULT_THUMB,
             "PING_IMG": self.PING_IMG,
             "START_IMG": self.START_IMG,
+            "OWNER_LINK": self.OWNER_LINK,
             "COOKIES_URL": self.COOKIES_URL,
             "DOWNLOADS_PATH": self.DOWNLOADS_PATH,
         }

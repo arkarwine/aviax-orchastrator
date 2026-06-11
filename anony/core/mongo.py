@@ -260,16 +260,23 @@ class MongoDB:
         return doc.get("settings", {}).get(key)
 
     async def set_config(self, key: str, value) -> None:
+        values = {f"settings.{key}": value}
+        if config.MANAGED_SETUP and config.DEPLOYMENT_ID and key != "DEPLOYMENT_ID":
+            values["settings.DEPLOYMENT_ID"] = config.DEPLOYMENT_ID
         await self.cache.update_one(
             {"_id": "runtime_config"},
-            {"$set": {f"settings.{key}": value}},
+            {"$set": values},
             upsert=True,
         )
 
     async def delete_config(self, key: str) -> None:
+        update = {"$unset": {f"settings.{key}": ""}}
+        if config.MANAGED_SETUP and config.DEPLOYMENT_ID:
+            update["$set"] = {"settings.DEPLOYMENT_ID": config.DEPLOYMENT_ID}
         await self.cache.update_one(
             {"_id": "runtime_config"},
-            {"$unset": {f"settings.{key}": ""}},
+            update,
+            upsert=True,
         )
 
     # PLAY MODE METHODS

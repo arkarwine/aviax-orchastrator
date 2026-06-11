@@ -4,6 +4,8 @@
 
 
 import asyncio
+import secrets
+import time
 
 from pyrogram import enums, filters, types
 
@@ -23,7 +25,7 @@ VALID_KEYS = [
     "DEFAULT_THUMB",
     "PING_IMG",
     "START_IMG",
-    "OWNER_ID",
+    "OWNER_LINK",
 ]
 BOOL_KEYS = {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY"}
 RESTART_REQUIRED_KEYS = {
@@ -40,6 +42,7 @@ RESTART_REQUIRED_KEYS = {
     "SESSION3",
 }
 refresh_lock = asyncio.Lock()
+owner_transfers = {}
 
 
 def restart_reason_lines(keys: list[str]) -> list[str]:
@@ -69,14 +72,14 @@ def restart_reason_lines(keys: list[str]) -> list[str]:
     return lines
 
 
-async def apply_owner_id(value: int) -> None:
+async def apply_owner_id(value: int, *, keep_previous_sudo: bool) -> None:
     previous_owner = app.owner
     await db.set_config("OWNER_ID", value)
     await db.add_sudo(value)
     config.apply_runtime_config({"OWNER_ID": value})
     app.owner = value
     app.sudoers.add(value)
-    if previous_owner and previous_owner != value:
+    if previous_owner and previous_owner != value and not keep_previous_sudo:
         app.sudoers.discard(previous_owner)
         try:
             await db.del_sudo(previous_owner)
@@ -86,10 +89,128 @@ async def apply_owner_id(value: int) -> None:
             await set_public_user_command_menu(previous_owner)
         except Exception:
             logger.warning("Owner changed, but old owner command menu cleanup failed.")
+    elif previous_owner and previous_owner != value:
+        app.sudoers.add(previous_owner)
+        await db.add_sudo(previous_owner)
+        try:
+            await set_user_command_menu(previous_owner)
+        except Exception:
+            logger.warning("Owner changed, but the previous owner's sudo menu could not be updated.")
     try:
         await set_user_command_menu(value, owner=True)
     except Exception:
         logger.warning("Owner changed, but the new owner command menu could not be updated.")
+
+
+@app.on_message(filters.command(["changeowner", "transferowner"]) & filters.private & ~app.bl_users)
+@lang.language()
+async def _change_owner(_, m: types.Message):
+    if m.from_user.id != app.owner:
+        return await m.reply_text("🔒 Only the current owner can transfer bot ownership.")
+    if len(m.command) < 2 or not m.command[1].isdigit() or int(m.command[1]) <= 0:
+        return await m.reply_text(
+            "👑 Usage: <code>/changeowner &lt;new_owner_user_id&gt;</code>\n\n"
+            "💡 Provide the new owner's numeric Telegram user ID."
+        )
+
+    new_owner = int(m.command[1])
+    if new_owner == app.owner:
+        return await m.reply_text("👑 You are already the bot owner.")
+
+    try:
+        user = await app.get_users(new_owner)
+        if user.is_bot:
+            return await m.reply_text(
+                "❌ A bot account cannot become the deployment owner.\n\n"
+                "💡 Provide the Telegram user ID of a person."
+            )
+        target = user.mention
+    except Exception:
+        target = f"<code>{new_owner}</code>"
+
+    token = secrets.token_urlsafe(8)
+    for pending_token, transfer in list(owner_transfers.items()):
+        if transfer["previous_owner"] == app.owner:
+            owner_transfers.pop(pending_token, None)
+    owner_transfers[token] = {
+        "previous_owner": app.owner,
+        "new_owner": new_owner,
+        "created_at": time.monotonic(),
+    }
+    await m.reply_text(
+        f"👑 Transfer ownership to {target}?\n\n"
+        "Would you like to remain as a sudo user after the transfer?",
+        reply_markup=types.InlineKeyboardMarkup(
+            [
+                [
+                    types.InlineKeyboardButton(
+                        "✅ Remain as sudo",
+                        callback_data=f"owner_transfer keep {token}",
+                        style=enums.ButtonStyle.SUCCESS,
+                    ),
+                    types.InlineKeyboardButton(
+                        "🚪 Remove my access",
+                        callback_data=f"owner_transfer remove {token}",
+                        style=enums.ButtonStyle.DANGER,
+                    ),
+                ],
+                [
+                    types.InlineKeyboardButton(
+                        "✖️ Cancel",
+                        callback_data=f"owner_transfer cancel {token}",
+                    )
+                ],
+            ]
+        ),
+    )
+
+
+@app.on_callback_query(filters.regex(r"^owner_transfer (keep|remove|cancel) "))
+async def _change_owner_confirm(_, query: types.CallbackQuery):
+    _, action, token = query.data.split(maxsplit=2)
+    transfer = owner_transfers.get(token)
+    if (
+        not transfer
+        or time.monotonic() - transfer["created_at"] > 600
+        or query.from_user.id != transfer["previous_owner"]
+        or app.owner != transfer["previous_owner"]
+    ):
+        owner_transfers.pop(token, None)
+        return await query.answer("This ownership transfer request is no longer valid.", show_alert=True)
+    owner_transfers.pop(token, None)
+    if action == "cancel":
+        await query.answer("Ownership transfer cancelled.")
+        return await query.message.edit_text("✖️ Ownership transfer cancelled.")
+
+    await query.answer("Transferring ownership...")
+    try:
+        await apply_owner_id(
+            transfer["new_owner"],
+            keep_previous_sudo=action == "keep",
+        )
+    except Exception:
+        logger.exception("Could not transfer bot ownership")
+        return await query.message.edit_text(
+            "❌ I could not transfer ownership.\n\n"
+            "💡 Check the database connection and try again."
+        )
+
+    access = (
+        "✅ You remain a sudo user."
+        if action == "keep"
+        else "🚪 Your previous owner access and sudo access were removed."
+    )
+    await query.message.edit_text(
+        f"✅ Ownership transferred to <code>{transfer['new_owner']}</code>.\n\n{access}"
+    )
+    try:
+        await app.send_message(
+            transfer["new_owner"],
+            "👑 You are now the owner of this music bot.\n\n"
+            "Use <code>/help</code> to view the commands available to you.",
+        )
+    except Exception:
+        logger.warning("Ownership transferred, but the new owner could not be notified.")
 
 
 async def build_api_client(settings: dict):
@@ -134,6 +255,15 @@ async def _refresh_config(_, m: types.Message):
             disk_defaults = candidate.snapshot()
             await status.edit_text("🗄️ Loading runtime overrides from the database...")
             runtime = await db.get_all_config()
+            if (
+                candidate.MANAGED_SETUP
+                and candidate.DEPLOYMENT_ID
+                and runtime
+                and not runtime.get("DEPLOYMENT_ID")
+            ):
+                await status.edit_text("🪪 Repairing the stored deployment identity...")
+                await db.set_config("DEPLOYMENT_ID", candidate.DEPLOYMENT_ID)
+                runtime["DEPLOYMENT_ID"] = candidate.DEPLOYMENT_ID
             if (
                 candidate.MANAGED_SETUP
                 and candidate.DEPLOYMENT_ID
@@ -299,15 +429,16 @@ async def _settings(_, m: types.Message):
             "• default_thumb (image URL)\n"
             "• ping_img (image URL)\n"
             "• start_img (image URL)\n"
-            "• owner_id (Telegram user ID, owner only)\n\n"
+            "• owner_link (Telegram profile or contact URL)\n\n"
             "Use <code>/config &lt;key&gt; &lt;value&gt;</code> to update a setting.\n"
             "Use <code>/config &lt;key&gt;</code> to view the current value.\n\n"
             "Examples:\n"
             "<code>/config auto_leave true</code>\n"
             "<code>/config lang_code en</code>\n"
-            "<code>/config owner_id 123456789</code>\n"
             "<code>/config default_thumb https://example.com/thumb.jpg</code>\n"
-            "<code>/config ping_img https://example.com/ping.jpg</code>\n\n"
+            "<code>/config ping_img https://example.com/ping.jpg</code>\n"
+            "<code>/config owner_link https://t.me/username</code>\n\n"
+            "Use <code>/changeowner &lt;user_id&gt;</code> to transfer ownership.\n\n"
             "Use <code>/refreshconfig</code> to reload the deployment <code>.env</code>, "
             "database overrides, and language files without restarting."
         )
@@ -315,9 +446,14 @@ async def _settings(_, m: types.Message):
         return
 
     key = m.command[1].upper()
+    if key == "OWNER_ID":
+        return await m.reply_text(
+            "👑 Ownership is managed separately.\n\n"
+            "💡 Use <code>/changeowner &lt;new_owner_user_id&gt;</code>."
+        )
     if key not in VALID_KEYS:
         return await m.reply_text(
-            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, lang_code, default_thumb, ping_img, start_img, owner_id"
+            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, lang_code, default_thumb, ping_img, start_img, owner_link"
         )
 
     if len(m.command) == 2:
@@ -333,10 +469,10 @@ async def _settings(_, m: types.Message):
     if not value:
         return await m.reply_text(f"❌ Please provide a value for <code>{key}</code>.")
 
-    if key == "OWNER_ID" and m.from_user.id != app.owner:
+    if key == "OWNER_LINK" and not value.startswith(("https://t.me/", "tg://")):
         return await m.reply_text(
-            "🔒 Only the current owner can change <code>OWNER_ID</code>.\n\n"
-            "💡 Ask the owner to run <code>/config owner_id &lt;user_id&gt;</code>."
+            "❌ Owner link must be a Telegram link.\n\n"
+            "💡 Example: <code>https://t.me/ViPdEeE</code>"
         )
 
     if key in BOOL_KEYS:
@@ -345,27 +481,6 @@ async def _settings(_, m: types.Message):
                 "❌ Boolean values must be true or false. Example: <code>true</code> or <code>false</code>."
             )
         value = value.lower() in ("true", "on", "yes", "1")
-
-    if key == "OWNER_ID":
-        if not value.isdigit() or int(value) <= 0:
-            return await m.reply_text(
-                "❌ Owner ID must be a positive number.\n\n"
-                "💡 Use the Telegram user ID, for example <code>123456789</code>."
-            )
-        value = int(value)
-        status = await m.reply_text("👑 Updating bot owner...")
-        try:
-            await apply_owner_id(value)
-        except Exception:
-            logger.exception("Could not update owner id")
-            return await status.edit_text(
-                "❌ I could not update the owner.\n\n"
-                "💡 Check the database connection and try again."
-            )
-        return await status.edit_text(
-            f"✅ Owner updated to <code>{value}</code>.\n\n"
-            "👑 The new owner now has sudo access too."
-        )
 
     await db.set_config(key, value)
     config.apply_runtime_config({key: value})
@@ -429,12 +544,12 @@ async def _reset_setting(_, m: types.Message):
     
     valid_keys = {
         "AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY",
-        "LANG_CODE", "DEFAULT_THUMB", "PING_IMG", "START_IMG",
+        "LANG_CODE", "DEFAULT_THUMB", "PING_IMG", "START_IMG", "OWNER_LINK",
     }
     
     if key not in valid_keys:
         return await m.reply_text(
-            "❌ Invalid setting key. Available keys: auto_leave, auto_end, thumb_gen, video_play, lang_code, default_thumb, ping_img, start_img"
+            "❌ Invalid setting key. Available keys: auto_leave, auto_end, thumb_gen, video_play, lang_code, default_thumb, ping_img, start_img, owner_link"
         )
     
     original_value = config._runtime_defaults.get(key)

@@ -84,10 +84,24 @@ You can skip first-user owner claiming by passing `owner_id` to `/newbot`.
 The deployed bot owner can also transfer ownership later with:
 
 ```text
-/config owner_id <user_id>
+/changeowner <user_id>
 ```
 
-Only the current owner can transfer ownership. The new owner receives sudo access, and the previous owner loses it.
+Only the current owner can transfer ownership. The command asks whether the previous owner should remain as a sudo user.
+
+The start-menu Owner button can point to a public Telegram profile independently of the owner ID:
+
+```text
+/config owner_link https://t.me/ViPdEeE
+```
+
+Assistant sessions can be removed by slot:
+
+```text
+/removesession <1|2|3>
+```
+
+Restart the deployed bot after removing a session to disconnect it and rebuild the assistant clients.
 
 ## Isolation Rules
 

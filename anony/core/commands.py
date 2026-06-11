@@ -58,6 +58,8 @@ SUDO_PRIVATE_COMMANDS = PUBLIC_PRIVATE_COMMANDS + [
 ]
 
 OWNER_PRIVATE_COMMANDS = SUDO_PRIVATE_COMMANDS + [
+    ("changeowner", "Transfer bot ownership"),
+    ("removesession", "Remove an assistant session"),
     ("addsudo", "Grant sudo access to a user"),
     ("delsudo", "Remove sudo access from a user"),
     ("eval", "Execute Python code as the owner"),

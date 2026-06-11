@@ -288,6 +288,53 @@ async def _edit_session(_, m: types.Message):
     )
 
 
+@app.on_message(filters.command(["removesession", "delsession"]) & filters.private & ~app.bl_users)
+@lang.language()
+async def _remove_session(_, m: types.Message):
+    if m.from_user.id != app.owner:
+        return await m.reply_text("🔒 Only the deployment owner can remove assistant sessions.")
+
+    if len(m.command) < 2 or m.command[1] not in {"1", "2", "3"}:
+        slots = "\n".join(
+            f"• Slot {number}: {'configured' if getattr(config, f'SESSION{number}') else 'empty'}"
+            for number in (1, 2, 3)
+        )
+        return await m.reply_text(
+            "🗑️ Usage: <code>/removesession &lt;1|2|3&gt;</code>\n\n"
+            f"{slots}\n\n💡 Choose the assistant session slot you want to remove."
+        )
+
+    slot = int(m.command[1])
+    key = f"SESSION{slot}"
+    if not getattr(config, key):
+        return await m.reply_text(f"📭 Assistant session slot <code>{slot}</code> is already empty.")
+
+    status = await m.reply_text(f"🗑️ Removing assistant session slot <code>{slot}</code>...")
+    try:
+        await db.delete_config(key)
+        config.apply_runtime_config({key: None})
+    except Exception:
+        logger.exception("Could not remove assistant session slot %s", slot)
+        return await status.edit_text(
+            "❌ I could not remove that assistant session.\n\n"
+            "💡 Check the database connection and try again."
+        )
+
+    remaining = sum(
+        bool(getattr(config, f"SESSION{number}"))
+        for number in (1, 2, 3)
+    )
+    warning = (
+        "\n\n⚠️ No assistant sessions remain. Playback will be unavailable after restart until you run <code>/addsession</code>."
+        if not remaining
+        else f"\n\n👥 Remaining stored sessions: <code>{remaining}</code>"
+    )
+    await status.edit_text(
+        f"✅ Assistant session slot <code>{slot}</code> was removed."
+        f"{warning}\n\n🔄 Run <code>/restart</code> to disconnect it and rebuild the assistant clients."
+    )
+
+
 async def begin_session_setup(m: types.Message, session_string: str | None = None):
     if not is_owner(m.from_user.id):
         return await m.reply_text("🔒 Only the deployment owner can add assistant sessions.")
