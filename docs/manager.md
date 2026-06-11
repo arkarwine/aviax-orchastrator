@@ -33,6 +33,7 @@ pm2 start "python3 manager.py" --name world
 ```text
 /newbot <name> <bot_token> [owner_id] [database_name]
 /reconfigure <name> <bot_token> [owner_id]
+/changedb <name> <database_name>
 /list
 /status <name>
 /deploy <name>
@@ -52,6 +53,8 @@ pm2 start "python3 manager.py" --name world
 ```
 
 `/reconfigure` verifies a new bot token, rebuilds the existing deployment configuration, and restarts it while preserving its MongoDB connection, `DB_NAME`, `DEPLOYMENT_ID`, and stored setup data.
+
+`/changedb` safely stops the specified deployment, switches only its `DB_NAME`, and starts it again. It does not copy, migrate, or delete data from either database.
 
 `/restart <name>` restarts only the specified deployed bot. It does not restart the manager.
 

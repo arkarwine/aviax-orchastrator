@@ -272,6 +272,7 @@ class BotManager:
         self.app.on_message(filters.private & filters.command("help") & filters.user(self.config.owner_id))(self.help)
         self.app.on_message(filters.private & filters.command("newbot") & filters.user(self.config.owner_id))(self.newbot)
         self.app.on_message(filters.private & filters.command(["reconfigure", "rebuild"]) & filters.user(self.config.owner_id))(self.reconfigure)
+        self.app.on_message(filters.private & filters.command(["changedb", "switchdb"]) & filters.user(self.config.owner_id))(self.change_database)
         self.app.on_message(filters.private & filters.command("list") & filters.user(self.config.owner_id))(self.list_bots)
         self.app.on_message(filters.private & filters.command("status") & filters.user(self.config.owner_id))(self.status)
         self.app.on_message(filters.private & filters.command("deploy") & filters.user(self.config.owner_id))(self.deploy)
@@ -293,6 +294,7 @@ class BotManager:
             "<b>🧰 Manager Commands</b>\n"
             "➕ /newbot &lt;name&gt; &lt;bot_token&gt; [owner_id] [database_name] - Create and start a deployment.\n"
             "🧰 /reconfigure &lt;name&gt; &lt;bot_token&gt; [owner_id] - Reconfigure a deployment while preserving its database.\n"
+            "🗄️ /changedb &lt;name&gt; &lt;database_name&gt; - Switch a deployment to another database.\n"
             "📋 /list - Show all deployments.\n"
             "🔎 /status &lt;name&gt; - Show deployment status.\n"
             "▶️ /deploy &lt;name&gt; - Start a stopped deployment.\n"
@@ -787,6 +789,115 @@ class BotManager:
             f"DB: <code>{deployment.db_name}</code> preserved\n"
             f"Deployment ID: <code>{deployment.deployment_id}</code> preserved\n\n"
             "✨ Existing setup and stored data remain available."
+        )
+
+    @handler_errors
+    async def change_database(self, client: Client, message: Message) -> None:
+        args = message.text.split(maxsplit=2)
+        if len(args) < 3:
+            return await message.reply_text(
+                "🗄️ Usage: <code>/changedb &lt;name&gt; &lt;database_name&gt;</code>\n\n"
+                "⚠️ This switches the deployment to another database. It does not copy or delete data.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        name = normalize_name(args[1])
+        database_name = args[2].strip()
+        database_error = validate_database_name(database_name)
+        if database_error:
+            return await message.reply_text(
+                f"❌ Invalid database name <code>{database_name}</code>.\n\n"
+                f"💡 {database_error}",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        deployment = self.store.get(name)
+        if not deployment:
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> was not found.\n\n"
+                "💡 Use <code>/list</code> to check registered deployment names.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        if deployment.db_name == database_name:
+            return await message.reply_text(
+                f"🟢 Deployment <b>{name}</b> already uses database <code>{database_name}</code>.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        env_path = deployment.deployment_path / ".env"
+        if not env_path.exists():
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> is missing its <code>.env</code> file.\n\n"
+                "💡 Restore the deployment files before changing its database.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        env_vars = self.load_deployment_env(env_path)
+        if not env_vars.get("MONGO_URL"):
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> does not have a stored MongoDB connection.\n\n"
+                "💡 Restore <code>MONGO_URL</code> in its <code>.env</code>, then try again.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        previous_database = deployment.db_name or env_vars.get("DB_NAME") or "unknown"
+        status = await message.reply_text(
+            f"🗄️ Preparing to switch <b>{name}</b> from <code>{previous_database}</code> "
+            f"to <code>{database_name}</code>...\n\n"
+            "⚠️ Existing data will remain in the previous database and will not be copied.",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+
+        if deployment.is_running:
+            await status.edit_text(f"⏹️ Stopping deployment <b>{name}</b> safely...")
+            stopped, error = self.stop_process(deployment)
+            if not stopped:
+                logger.error("Could not stop deployment %s before database switch: %s", name, error)
+                return await status.edit_text(
+                    f"❌ Deployment <b>{name}</b> could not be stopped, so its database was not changed.\n\n"
+                    f"💡 Run <code>/stop {name}</code>, then try again."
+                )
+            self.store.update(deployment)
+        elif deployment.pid:
+            deployment.pid = None
+            self.processes.pop(deployment.name, None)
+            self.store.update(deployment)
+
+        await status.edit_text(f"💾 Switching deployment <b>{name}</b> to <code>{database_name}</code>...")
+        env_vars["DB_NAME"] = database_name
+        env_tmp_path = env_path.with_name(".env.tmp")
+        try:
+            env_tmp_path.write_text(
+                "\n".join(f"{key}={value}" for key, value in env_vars.items()),
+                encoding="utf-8",
+            )
+            env_tmp_path.replace(env_path)
+        except Exception:
+            logger.exception("Could not update database for deployment %s", name)
+            return await status.edit_text(
+                f"❌ I could not update deployment <b>{name}</b>.\n\n"
+                f"💡 Check the deployment directory permissions. It still uses <code>{previous_database}</code>."
+            )
+
+        deployment.db_name = database_name
+        self.store.update(deployment)
+        await status.edit_text(f"🚀 Starting deployment <b>{name}</b> with its new database...")
+        started, error = self.start_process(deployment)
+        if not started:
+            self.store.update(deployment)
+            logger.error("Deployment %s could not start after database switch: %s", name, error)
+            return await status.edit_text(
+                f"⚠️ Deployment <b>{name}</b> now points to <code>{database_name}</code>, but it could not start.\n\n"
+                f"💡 Check its <code>run.log</code>, then run <code>/deploy {name}</code>.\n"
+                f"↩️ To return to the previous database, run <code>/changedb {name} {previous_database}</code>."
+            )
+
+        deployment.started_at = datetime.now(timezone.utc).isoformat()
+        self.store.update(deployment)
+        await status.edit_text(
+            f"✅ Deployment <b>{name}</b> switched databases and started successfully.\n\n"
+            f"🗄️ Current database: <code>{database_name}</code>\n"
+            f"📦 Previous database: <code>{previous_database}</code>\n\n"
+            "ℹ️ No data was copied or deleted."
         )
 
     async def verify_bot_token(self, bot_token: str):
