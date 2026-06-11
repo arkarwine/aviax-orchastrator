@@ -5,11 +5,14 @@
 
 import asyncio
 import importlib
+import logging
 import signal
+import traceback
 from contextlib import suppress
 
 from anony import anon, app, config, db, logger, stop, thumb, userbot, yt
 from anony.core.commands import sync_command_menus
+from anony.core.health import health
 from anony.plugins import all_modules
 
 
@@ -39,6 +42,20 @@ async def idle():
     await stop_event.wait()
 
 async def main():
+    loop = asyncio.get_running_loop()
+    default_exception_handler = loop.get_exception_handler()
+
+    def log_background_exception(event_loop, context):
+        logger.error(
+            "Unhandled background task error: %s",
+            context.get("message", "unknown background task failure"),
+            exc_info=context.get("exception"),
+        )
+        if default_exception_handler:
+            default_exception_handler(event_loop, context)
+
+    loop.set_exception_handler(log_background_exception)
+    health.start()
     await db.connect()
     stored_runtime_settings = await db.get_all_config()
     if (
@@ -84,12 +101,19 @@ async def main():
     if menu_warnings:
         logger.warning("Command menus registered with %d warning(s).", len(menu_warnings))
 
+    health.mark_healthy()
     await idle()
-    await stop()
+    await stop("termination signal received")
 
 
 if __name__ == "__main__":
     try:
-        asyncio.get_event_loop().run_until_complete(main())
+        asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        health.fatal("keyboard interrupt")
+    except BaseException as exc:
+        health.fatal(f"{type(exc).__name__}: {exc}")
+        logging.getLogger(__name__).critical(
+            "Fatal deployed bot error:\n%s", traceback.format_exc()
+        )
+        raise

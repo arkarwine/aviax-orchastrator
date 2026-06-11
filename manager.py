@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import html
 import json
 import logging
 import os
@@ -8,9 +9,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
+import time
+import traceback
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -60,6 +64,25 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+
+class SecretRedactionFilter(logging.Filter):
+    @staticmethod
+    def redact(message: str) -> str:
+        message = re.sub(r"(?i)(key|token|api_key)=([^&\s\"']+)", r"\1=[REDACTED]", message)
+        message = re.sub(r"\b\d{8,12}:[A-Za-z0-9_-]{20,}\b", "[REDACTED_BOT_TOKEN]", message)
+        return re.sub(r"mongodb(?:\+srv)?://[^\s\"']+", "[REDACTED_MONGO_URL]", message)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = self.redact(record.getMessage())
+        record.args = ()
+        if record.exc_info:
+            record.exc_text = self.redact("".join(traceback.format_exception(*record.exc_info)))
+        return True
+
+
+for handler in logging.getLogger().handlers:
+    handler.addFilter(SecretRedactionFilter())
 
 
 @dataclass
@@ -120,13 +143,22 @@ class DeploymentMeta:
     deployment_id: Optional[str] = None
     pid: Optional[int] = None
     started_at: Optional[str] = None
+    process_created_at: Optional[float] = None
+    desired_running: bool = False
+    restart_history: list[str] = field(default_factory=list)
+    last_failure: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["restart_history"] = self.restart_history or []
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "DeploymentMeta":
-        return cls(**data)
+        values = dict(data)
+        values.setdefault("desired_running", bool(values.get("pid")))
+        values.setdefault("restart_history", [])
+        return cls(**values)
 
     @property
     def deployment_path(self) -> Path:
@@ -138,7 +170,14 @@ class DeploymentMeta:
             return False
         try:
             process = psutil.Process(self.pid)
-            return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+            if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
+                return False
+            if self.process_created_at and abs(process.create_time() - self.process_created_at) > 2:
+                return False
+            try:
+                return Path(process.cwd()).resolve() == self.deployment_path.resolve()
+            except (psutil.AccessDenied, psutil.ZombieProcess):
+                return True
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             return False
 
@@ -147,6 +186,7 @@ class DeploymentStore:
     def __init__(self, store_path: Path) -> None:
         self.store_path = store_path
         self.deployments: Dict[str, DeploymentMeta] = {}
+        self.lock = threading.RLock()
         self.load()
 
     def load(self) -> None:
@@ -167,33 +207,41 @@ class DeploymentStore:
             self.deployments = {}
 
     def save(self) -> None:
-        logger.info("Saving %d deployments to %s", len(self.deployments), self.store_path)
-        self.store_path.write_text(
-            json.dumps(
-                {"deployments": {name: deployment.to_dict() for name, deployment in self.deployments.items()}},
-                indent=2,
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
+        with self.lock:
+            logger.info("Saving %d deployments to %s", len(self.deployments), self.store_path)
+            temporary = self.store_path.with_suffix(".json.tmp")
+            temporary.write_text(
+                json.dumps(
+                    {"deployments": {name: deployment.to_dict() for name, deployment in self.deployments.items()}},
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            temporary.replace(self.store_path)
 
     def add(self, deployment: DeploymentMeta) -> None:
-        self.deployments[deployment.name] = deployment
-        self.save()
+        with self.lock:
+            self.deployments[deployment.name] = deployment
+            self.save()
 
     def update(self, deployment: DeploymentMeta) -> None:
-        self.deployments[deployment.name] = deployment
-        self.save()
+        with self.lock:
+            self.deployments[deployment.name] = deployment
+            self.save()
 
     def remove(self, name: str) -> None:
-        self.deployments.pop(name, None)
-        self.save()
+        with self.lock:
+            self.deployments.pop(name, None)
+            self.save()
 
     def get(self, name: str) -> Optional[DeploymentMeta]:
-        return self.deployments.get(name)
+        with self.lock:
+            return self.deployments.get(name)
 
     def list(self) -> Dict[str, DeploymentMeta]:
-        return self.deployments
+        with self.lock:
+            return dict(self.deployments)
 
 
 def normalize_name(value: str) -> str:
@@ -257,9 +305,16 @@ class BotManager:
         self.config = config
         self.store = store
         self.shutdown_event = threading.Event()
-        self.monitor_interval = int(os.getenv("MANAGER_MONITOR_INTERVAL", "20"))
+        self.monitor_interval = max(5, int(os.getenv("MANAGER_MONITOR_INTERVAL", "20")))
+        self.health_stale_after = max(30, int(os.getenv("MANAGER_HEALTH_STALE_AFTER", "120")))
+        self.health_confirmations = max(2, int(os.getenv("MANAGER_HEALTH_CONFIRMATIONS", "2")))
+        self.recovery_limit = max(1, int(os.getenv("MANAGER_RECOVERY_LIMIT", "3")))
+        self.recovery_window = max(60, int(os.getenv("MANAGER_RECOVERY_WINDOW", "3600")))
         self.processes: Dict[str, subprocess.Popen] = {}
         self.failed_restarts: set[str] = set()
+        self.stale_health_counts: Dict[str, int] = {}
+        self.recovering: set[str] = set()
+        self.recovery_guard = threading.Lock()
         self.app = Client(
             name="deploy-manager",
             api_id=self.config.api_id,
@@ -279,6 +334,7 @@ class BotManager:
         self.app.on_message(filters.private & filters.command("stop") & filters.user(self.config.owner_id))(self.stop)
         self.app.on_message(filters.private & filters.command("delete") & filters.user(self.config.owner_id))(self.delete)
         self.app.on_message(filters.private & filters.command("restart") & filters.user(self.config.owner_id))(self.restart)
+        self.app.on_message(filters.private & filters.command("logs") & filters.user(self.config.owner_id))(self.logs)
 
     @handler_errors
     async def start(self, client: Client, message: Message) -> None:
@@ -300,7 +356,8 @@ class BotManager:
             "▶️ /deploy &lt;name&gt; - Start a stopped deployment.\n"
             "⏹️ /stop &lt;name&gt; - Stop a running deployment.\n"
             "🗑️ /delete &lt;name&gt; - Permanently delete a deployment.\n"
-            "🔄 /restart &lt;name&gt; - Restart a deployed bot.\n",
+            "🔄 /restart &lt;name&gt; - Restart a deployed bot.\n"
+            "📄 /logs &lt;name&gt; - Retrieve a deployment's full log.\n",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
 
@@ -311,7 +368,8 @@ class BotManager:
 
         lines = ["<b>📋 Deployments</b>"]
         for name, deployment in self.store.list().items():
-            status = "🟢 running" if deployment.is_running else "⚫ stopped"
+            state, _, _ = self.deployment_health(deployment)
+            status = self.format_health_state(state)
             lines.append(
                 f"<b>{deployment.username}</b> ({name}) — <code>{status}</code>"
             )
@@ -328,7 +386,7 @@ class BotManager:
         if not deployment:
             return await message.reply_text(f"❌ Deployment <b>{name}</b> was not found.\n\n💡 Use /list to check registered names.", reply_parameters=ReplyParameters(message_id=message.id))
 
-        state = "running" if deployment.is_running else "stopped"
+        state, health, reason = self.deployment_health(deployment)
         text = (
             f"<b>{deployment.username}</b>\n"
             f"Name: <code>{deployment.name}</code>\n"
@@ -337,10 +395,25 @@ class BotManager:
             f"Deployment ID: <code>{deployment.deployment_id or 'legacy'}</code>\n"
             f"Status: <code>{state}</code>\n"
             f"PID: <code>{deployment.pid or 'none'}</code>\n"
+            f"Desired: <code>{'running' if deployment.desired_running else 'stopped'}</code>\n"
             f"Created: {deployment.created_at}\n"
             f"Started: {deployment.started_at or 'never'}\n"
             f"Path: <code>{deployment.deployment_path}</code>"
         )
+        if health:
+            try:
+                age_text = f"{max(0, int(time.time() - float(health.get('timestamp', 0))))}s"
+            except (TypeError, ValueError):
+                age_text = "unavailable"
+            text += (
+                f"\nHeartbeat age: <code>{age_text}</code>"
+                f"\nEvent-loop delay: <code>{health.get('event_loop_delay', 0)}s</code>"
+                f"\nActive calls: <code>{health.get('active_voice_chats', 0)}</code>"
+            )
+        if reason:
+            text += f"\nReason: <code>{html.escape(reason)}</code>"
+        if deployment.last_failure:
+            text += f"\nLast failure: <code>{html.escape(deployment.last_failure)}</code>"
         await message.reply_text(text, reply_parameters=ReplyParameters(message_id=message.id))
 
     @handler_errors
@@ -353,6 +426,12 @@ class BotManager:
         deployment = self.store.get(name)
         if not deployment:
             return await message.reply_text(f"❌ Deployment <b>{name}</b> was not found.\n\n💡 Use /list to check registered names.", reply_parameters=ReplyParameters(message_id=message.id))
+        if name in self.recovering:
+            return await message.reply_text(
+                f"🔄 Deployment <b>{name}</b> is currently being recovered.\n\n"
+                "💡 Wait for the recovery report before starting it manually.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
 
         if deployment.is_running:
             return await message.reply_text(
@@ -386,8 +465,12 @@ class BotManager:
             return await message.reply_text(f"❌ Deployment <b>{name}</b> was not found.\n\n💡 Use /list to check registered names.", reply_parameters=ReplyParameters(message_id=message.id))
 
         if not deployment.is_running:
+            deployment.desired_running = False
+            self.store.update(deployment)
             return await message.reply_text(f"⚫ Deployment <b>{name}</b> is already stopped.", reply_parameters=ReplyParameters(message_id=message.id))
 
+        deployment.desired_running = False
+        self.store.update(deployment)
         stopped, error = self.stop_process(deployment)
         if stopped:
             self.store.update(deployment)
@@ -399,6 +482,50 @@ class BotManager:
                 "💡 Check whether its process still exists, then try again.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
+
+    @handler_errors
+    async def logs(self, client: Client, message: Message) -> None:
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            return await message.reply_text(
+                "📄 Usage: <code>/logs &lt;name&gt;</code>",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        name = normalize_name(args[1])
+        deployment = self.store.get(name)
+        if not deployment:
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> was not found.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        log_path = deployment.deployment_path / "run.log"
+        if not log_path.exists():
+            return await message.reply_text(
+                f"📭 Deployment <b>{name}</b> does not have a run log yet.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        sanitized_path = None
+        try:
+            content = self.sanitize_text(
+                deployment,
+                log_path.read_text(encoding="utf-8", errors="replace"),
+            )
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=f"-{name}-run.log",
+                delete=False,
+            ) as sanitized:
+                sanitized.write(content)
+                sanitized_path = sanitized.name
+            await message.reply_document(
+                sanitized_path,
+                caption=f"📄 Sanitized full run log for <b>{name}</b>",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        finally:
+            if sanitized_path:
+                Path(sanitized_path).unlink(missing_ok=True)
 
     @handler_errors
     async def delete(self, client: Client, message: Message) -> None:
@@ -415,6 +542,12 @@ class BotManager:
         if not deployment:
             return await message.reply_text(
                 f"❌ Deployment <b>{name}</b> was not found.\n\n💡 Use /list to check the registered names.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        if name in self.recovering:
+            return await message.reply_text(
+                f"🔄 Deployment <b>{name}</b> is currently being recovered.\n\n"
+                "💡 Wait for the recovery report before deleting it.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
@@ -472,6 +605,12 @@ class BotManager:
             return await message.reply_text(
                 f"❌ Deployment <b>{name}</b> was not found.\n\n"
                 "💡 Use <code>/list</code> to check registered deployment names.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        if name in self.recovering:
+            return await message.reply_text(
+                f"🔄 Deployment <b>{name}</b> is already being recovered automatically.\n\n"
+                "💡 Wait for the recovery report before restarting it manually.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
@@ -669,6 +808,12 @@ class BotManager:
                 "💡 Use <code>/newbot</code> to create a new deployment or <code>/list</code> to check registered names.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
+        if name in self.recovering:
+            return await message.reply_text(
+                f"🔄 Deployment <b>{name}</b> is currently being recovered.\n\n"
+                "💡 Wait for the recovery report before reconfiguring it.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
         if owner_id and not owner_id.isdigit():
             return await message.reply_text(
                 "❌ Owner ID must be numeric.\n\n"
@@ -818,6 +963,12 @@ class BotManager:
                 "💡 Use <code>/list</code> to check registered deployment names.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
+        if name in self.recovering:
+            return await message.reply_text(
+                f"🔄 Deployment <b>{name}</b> is currently being recovered.\n\n"
+                "💡 Wait for the recovery report before changing its database.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
         if deployment.db_name == database_name:
             return await message.reply_text(
                 f"🟢 Deployment <b>{name}</b> already uses database <code>{database_name}</code>.",
@@ -936,8 +1087,258 @@ class BotManager:
         except Exception as exc:
             logger.warning("Failed to schedule app call %s: %s", func.__name__, exc)
 
+    async def _send_owner_with_retry(self, text: str) -> None:
+        for attempt in range(1, 4):
+            try:
+                await self.app.send_message(self.config.owner_id, text)
+                return
+            except Exception as exc:
+                logger.warning("Owner notification attempt %s failed: %s", attempt, exc)
+                if attempt < 3:
+                    await asyncio.sleep(attempt * 2)
+        logger.error("Owner notification could not be delivered after 3 attempts.")
+
     def _notify_owner(self, text: str) -> None:
-        self._run_on_app_loop(self.app.send_message, self.config.owner_id, text)
+        self._run_on_app_loop(self._send_owner_with_retry, text)
+
+    def process_matches(self, deployment: DeploymentMeta) -> bool:
+        if not deployment.pid:
+            return False
+        try:
+            process = psutil.Process(deployment.pid)
+            if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
+                return False
+            if deployment.process_created_at and abs(process.create_time() - deployment.process_created_at) > 2:
+                return False
+            try:
+                return Path(process.cwd()).resolve() == deployment.deployment_path.resolve()
+            except (psutil.AccessDenied, psutil.ZombieProcess):
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            return False
+
+    def read_health(self, deployment: DeploymentMeta) -> Optional[dict]:
+        path = deployment.deployment_path / ".health.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("pid") != deployment.pid:
+                return None
+            return data
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def deployment_health(self, deployment: DeploymentMeta) -> tuple[str, Optional[dict], str]:
+        if deployment.name in self.recovering:
+            return "recovering", self.read_health(deployment), "automatic recovery in progress"
+        if not deployment.desired_running:
+            return "stopped", self.read_health(deployment), "stopped intentionally"
+        if not self.process_matches(deployment):
+            return "stopped", self.read_health(deployment), "deployment process is not running"
+
+        health = self.read_health(deployment)
+        if not health:
+            if not deployment.process_created_at:
+                return "healthy", None, "heartbeat monitoring activates after the deployment's next restart"
+            started = self.parse_timestamp(deployment.started_at)
+            if started and time.time() - started < self.health_stale_after:
+                return "starting", None, "waiting for the first heartbeat"
+            return "frozen", None, "heartbeat file is missing or belongs to another process"
+
+        try:
+            age = time.time() - float(health.get("timestamp", 0))
+        except (TypeError, ValueError):
+            return "frozen", health, "heartbeat timestamp is invalid"
+        state = str(health.get("state", "healthy"))
+        if state == "fatal":
+            return "frozen", health, str(health.get("reason") or "fatal runtime error")
+        if age <= self.health_stale_after:
+            return ("starting" if state == "starting" else "healthy"), health, ""
+        return "frozen", health, f"heartbeat is {int(age)} seconds old"
+
+    @staticmethod
+    def format_health_state(state: str) -> str:
+        return {
+            "healthy": "🟢 healthy",
+            "starting": "🟡 starting",
+            "frozen": "🔴 frozen",
+            "recovering": "🔄 recovering",
+            "stopped": "⚫ stopped",
+        }.get(state, state)
+
+    @staticmethod
+    def parse_timestamp(value: Optional[str]) -> Optional[float]:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value).timestamp()
+        except ValueError:
+            return None
+
+    def sanitize_text(self, deployment: DeploymentMeta, text: str) -> str:
+        env = self.load_deployment_env(deployment.deployment_path / ".env")
+        for key in ("BOT_TOKEN", "API_HASH", "API_KEY", "MONGO_URL", "SESSION", "SESSION1", "SESSION2", "SESSION3"):
+            secret = env.get(key)
+            if secret:
+                text = text.replace(secret, "[REDACTED]")
+        text = re.sub(r"(?i)(key|token|api_key)=([^&\s\"']+)", r"\1=[REDACTED]", text)
+        text = re.sub(r"\b\d{8,12}:[A-Za-z0-9_-]{20,}\b", "[REDACTED_BOT_TOKEN]", text)
+        text = re.sub(r"mongodb(?:\+srv)?://[^\s\"']+", "[REDACTED_MONGO_URL]", text)
+        return text
+
+    def diagnostic_report(self, deployment: DeploymentMeta, reason: str) -> str:
+        health = self.read_health(deployment) or {}
+        lines = []
+        log_path = deployment.deployment_path / "run.log"
+        if log_path.exists():
+            try:
+                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-12:]
+            except OSError:
+                lines = []
+
+        cpu = memory = 0.0
+        children = ffmpeg = 0
+        if deployment.pid:
+            try:
+                process = psutil.Process(deployment.pid)
+                cpu = process.cpu_percent(interval=0.2)
+                memory = process.memory_info().rss / 1024**2
+                child_processes = process.children(recursive=True)
+                children = len(child_processes)
+                for child in child_processes:
+                    try:
+                        ffmpeg += int("ffmpeg" in child.name().lower())
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+
+        system_memory = psutil.virtual_memory()
+        system_cpu = psutil.cpu_percent(interval=0.2)
+        started = self.parse_timestamp(deployment.started_at)
+        uptime = int(time.time() - started) if started else 0
+        tail = self.sanitize_text(deployment, "\n".join(lines))
+        tail = html.escape(tail[-1200:])[:2200] if tail else "No recent log lines were available."
+        return (
+            f"<b>⚠️ Deployment health failure: {html.escape(deployment.name)}</b>\n\n"
+            f"Reason: <code>{html.escape(reason)}</code>\n"
+            f"PID: <code>{deployment.pid or 'none'}</code>\n"
+            f"Uptime: <code>{uptime}s</code>\n"
+            f"Last heartbeat: <code>{health.get('timestamp', 'unavailable')}</code>\n"
+            f"Event-loop delay: <code>{health.get('event_loop_delay', 'unavailable')}s</code>\n"
+            f"Bot CPU: <code>{cpu:.1f}%</code>\n"
+            f"Bot memory: <code>{memory:.1f} MB</code>\n"
+            f"System CPU: <code>{system_cpu:.1f}%</code>\n"
+            f"System memory: <code>{system_memory.percent:.1f}%</code>\n"
+            f"Child processes: <code>{children}</code> (FFmpeg: <code>{ffmpeg}</code>)\n"
+            f"Recent automatic recoveries: <code>{len(deployment.restart_history or [])}</code>\n"
+            f"Playback operations: <code>{html.escape(str(health.get('playback_operations', {})))[:500]}</code>\n\n"
+            f"<b>Recent sanitized log lines</b>\n<pre>{tail}</pre>"
+        )
+
+    def recent_recoveries(self, deployment: DeploymentMeta) -> list[str]:
+        cutoff = time.time() - self.recovery_window
+        recent = [
+            value for value in (deployment.restart_history or [])
+            if (self.parse_timestamp(value) or 0) >= cutoff
+        ]
+        deployment.restart_history = recent
+        return recent
+
+    def recover_deployment(self, deployment: DeploymentMeta, reason: str) -> None:
+        with self.recovery_guard:
+            if deployment.name in self.recovering:
+                return
+            self.recovering.add(deployment.name)
+        try:
+            recent = self.recent_recoveries(deployment)
+            if len(recent) >= self.recovery_limit:
+                if deployment.name in self.failed_restarts:
+                    return
+                report = self.diagnostic_report(deployment, reason)
+                deployment.last_failure = f"Recovery limit reached: {reason}"
+                self.store.update(deployment)
+                self.failed_restarts.add(deployment.name)
+                self._notify_owner(
+                    report
+                    + f"\n\n🛑 Automatic recovery stopped after {self.recovery_limit} attempts "
+                    f"within one hour. Inspect the deployment and use <code>/restart {deployment.name}</code>."
+                )
+                return
+
+            report = self.diagnostic_report(deployment, reason)
+            if self.process_matches(deployment):
+                stopped, error = self.stop_process(deployment)
+                if not stopped:
+                    deployment.last_failure = f"Frozen process could not be stopped: {error}"
+                    self.store.update(deployment)
+                    self._notify_owner(report + "\n\n❌ Automatic recovery failed because the frozen process could not be stopped.")
+                    return
+            else:
+                deployment.pid = None
+                deployment.process_created_at = None
+
+            if not deployment.desired_running:
+                self.store.update(deployment)
+                self._notify_owner(
+                    report
+                    + f"\n\n⏹️ Automatic recovery for <b>{deployment.name}</b> was cancelled because it was stopped intentionally."
+                )
+                return
+
+            deployment.restart_history = recent + [datetime.now(timezone.utc).isoformat()]
+            deployment.last_failure = reason
+            started, error = self.start_process(deployment, mark_desired=False)
+            self.store.update(deployment)
+            if not started:
+                self._notify_owner(
+                    report
+                    + f"\n\n❌ Automatic restart failed. Use <code>/deploy {deployment.name}</code> after checking the logs."
+                )
+                return
+            if not deployment.desired_running:
+                self.stop_process(deployment)
+                self.store.update(deployment)
+                self._notify_owner(
+                    report
+                    + f"\n\n⏹️ Deployment <b>{deployment.name}</b> was stopped because an intentional stop was requested during recovery."
+                )
+                return
+
+            recovered = False
+            deadline = time.time() + max(self.health_stale_after, 120)
+            while time.time() < deadline and not self.shutdown_event.wait(3):
+                health = self.read_health(deployment)
+                try:
+                    fresh = health and time.time() - float(health.get("timestamp", 0)) <= self.health_stale_after
+                except (TypeError, ValueError):
+                    fresh = False
+                if self.process_matches(deployment) and fresh and health.get("state") == "healthy":
+                    recovered = True
+                    break
+                if not self.process_matches(deployment):
+                    break
+            self.store.update(deployment)
+            if not deployment.desired_running:
+                self._notify_owner(
+                    report
+                    + f"\n\n⏹️ Automatic recovery for <b>{deployment.name}</b> ended because it was stopped intentionally."
+                )
+                return
+            if recovered:
+                self._notify_owner(
+                    report
+                    + f"\n\n✅ Deployment <b>{deployment.name}</b> was restarted automatically because it stopped responding."
+                )
+            else:
+                self._notify_owner(
+                    report
+                    + f"\n\n⚠️ Deployment <b>{deployment.name}</b> was restarted automatically, "
+                    "but it did not become healthy before the recovery check timed out."
+                )
+        finally:
+            self.stale_health_counts.pop(deployment.name, None)
+            with self.recovery_guard:
+                self.recovering.discard(deployment.name)
 
     def _send_deployment_log(self, deployment: DeploymentMeta) -> None:
         log_path = deployment.deployment_path / "run.log"
@@ -947,40 +1348,75 @@ class BotManager:
             )
             return
 
+        self._run_on_app_loop(self._send_sanitized_log, deployment)
+
+    async def _send_sanitized_log(self, deployment: DeploymentMeta) -> None:
+        log_path = deployment.deployment_path / "run.log"
+        sanitized_path = None
         try:
-            self._run_on_app_loop(
-                self.app.send_document,
+            content = self.sanitize_text(
+                deployment,
+                log_path.read_text(encoding="utf-8", errors="replace"),
+            )
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=f"-{deployment.name}-run.log",
+                delete=False,
+            ) as sanitized:
+                sanitized.write(content)
+                sanitized_path = sanitized.name
+            await self.app.send_document(
                 self.config.owner_id,
-                str(log_path),
-                caption=f"Deployment <b>{deployment.name}</b> error log",
+                sanitized_path,
+                caption=f"Sanitized error log for <b>{deployment.name}</b>",
             )
         except Exception as exc:
             logger.warning("Could not send deployment log for %s: %s", deployment.name, exc)
-            self._notify_owner(
+            await self._send_owner_with_retry(
                 f"⚠️ I could not send the error log for <b>{deployment.name}</b>.\n\n"
                 "💡 Check the deployment directory permissions and manager logs."
             )
+        finally:
+            if sanitized_path:
+                Path(sanitized_path).unlink(missing_ok=True)
 
     def _monitor_loop(self) -> None:
         logger.info("Deployment watcher started with interval %s seconds.", self.monitor_interval)
         while not self.shutdown_event.wait(self.monitor_interval):
             for deployment in list(self.store.list().values()):
-                if deployment.pid and not deployment.is_running:
-                    if deployment.name in self.failed_restarts:
+                try:
+                    state, _, reason = self.deployment_health(deployment)
+                    if state in {"healthy", "starting", "recovering"} or (
+                        state == "stopped" and not deployment.desired_running
+                    ):
+                        self.stale_health_counts.pop(deployment.name, None)
                         continue
-
+                    confirmations = self.stale_health_counts.get(deployment.name, 0) + 1
+                    self.stale_health_counts[deployment.name] = confirmations
                     logger.warning(
-                        "Deployment %s exited unexpectedly (pid=%s); sending logs instead of restarting.",
+                        "Deployment %s health check failed (%s/%s): %s",
                         deployment.name,
-                        deployment.pid,
+                        confirmations,
+                        self.health_confirmations,
+                        reason,
                     )
-                    self.failed_restarts.add(deployment.name)
-                    self._notify_owner(
-                        f"⚠️ Deployment <b>{deployment.name}</b> exited unexpectedly and will not be auto-restarted. Sending logs now."
-                    )
-                    self._send_deployment_log(deployment)
+                    if confirmations >= self.health_confirmations:
+                        threading.Thread(
+                            target=self.recover_deployment,
+                            args=(deployment, reason),
+                            name=f"recover-{deployment.name}",
+                            daemon=True,
+                        ).start()
+                except Exception:
+                    logger.exception("Deployment health check failed unexpectedly for %s", deployment.name)
 
-    def start_process(self, deployment: DeploymentMeta) -> tuple[bool, Optional[str]]:
+    def start_process(
+        self,
+        deployment: DeploymentMeta,
+        *,
+        mark_desired: bool = True,
+    ) -> tuple[bool, Optional[str]]:
         env = os.environ.copy()
         for key in DEPLOYMENT_ENV_KEYS:
             env.pop(key, None)
@@ -997,52 +1433,29 @@ class BotManager:
         env["PYTHONPATH"] = str(self.config.template_path)
 
         log_file = deployment.deployment_path / "run.log"
+        health_file = deployment.deployment_path / ".health.json"
+        try:
+            health_file.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove stale health file for %s", deployment.name)
         logger.info("Starting deployment %s at %s", deployment.name, deployment.deployment_path)
         try:
-            if os.name == "posix":
-                read_fd, write_fd = os.pipe()
-                pid = os.fork()
-                if pid == 0:
-                    try:
-                        os.close(read_fd)
-                        os.setsid()
-                        pid2 = os.fork()
-                        if pid2 > 0:
-                            os.write(write_fd, str(pid2).encode("utf-8"))
-                            os.close(write_fd)
-                            os._exit(0)
-
-                        os.close(write_fd)
-                        with open(os.devnull, "rb") as stdin, log_file.open("a", encoding="utf-8") as stdout:
-                            os.dup2(stdin.fileno(), 0)
-                            os.dup2(stdout.fileno(), 1)
-                            os.dup2(stdout.fileno(), 2)
-                            os.chdir(deployment.deployment_path)
-                            os.execvpe(sys.executable, [sys.executable, "-m", "anony"], env)
-                    except Exception as exc:
-                        logger.error("Daemon launch failed for %s: %s", deployment.name, exc)
-                        os._exit(1)
-
-                os.close(write_fd)
-                child_pid_bytes = os.read(read_fd, 32)
-                os.close(read_fd)
-                if not child_pid_bytes:
-                    os.waitpid(pid, 0)
-                    return False, "Failed to capture deployment pid."
-
-                os.waitpid(pid, 0)
-                deployment.pid = int(child_pid_bytes.decode("utf-8").strip())
-                self.processes[deployment.name] = None
-            else:
+            with open(os.devnull, "rb") as stdin, log_file.open("a", encoding="utf-8") as stdout:
                 process = subprocess.Popen(
                     [sys.executable, "-m", "anony"],
                     cwd=deployment.deployment_path,
                     env=env,
-                    stdout=log_file.open("a", encoding="utf-8"),
+                    stdin=stdin,
+                    stdout=stdout,
                     stderr=subprocess.STDOUT,
+                    start_new_session=os.name == "posix",
                 )
-                deployment.pid = process.pid
-                self.processes[deployment.name] = process
+            deployment.pid = process.pid
+            self.processes[deployment.name] = process
+            deployment.process_created_at = psutil.Process(deployment.pid).create_time()
+            if mark_desired:
+                deployment.desired_running = True
+            deployment.started_at = datetime.now(timezone.utc).isoformat()
             self.failed_restarts.discard(deployment.name)
             logger.info("Deployment %s started with pid=%s", deployment.name, deployment.pid)
             return True, None
@@ -1055,17 +1468,41 @@ class BotManager:
         if not deployment.pid:
             logger.warning("Deployment %s has no pid to stop.", deployment.name)
             return False, "No pid found for deployment."
+        if not self.process_matches(deployment):
+            logger.warning("Deployment %s has a stale or mismatched pid; clearing it without sending a signal.", deployment.name)
+            deployment.pid = None
+            deployment.process_created_at = None
+            self.processes.pop(deployment.name, None)
+            return True, None
         pid = deployment.pid
         logger.info("Stopping deployment %s pid=%s", deployment.name, pid)
         process = self.processes.get(deployment.name)
 
         def stopped() -> tuple[bool, Optional[str]]:
+            for child in child_processes:
+                try:
+                    if child.is_running():
+                        child.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
             logger.info("Deployment %s stopped.", deployment.name)
             deployment.pid = None
+            deployment.process_created_at = None
             self.processes.pop(deployment.name, None)
             return True, None
 
         try:
+            root_process = psutil.Process(pid)
+            child_processes = root_process.children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            child_processes = []
+
+        try:
+            for child in child_processes:
+                try:
+                    child.terminate()
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
             if process and process.poll() is None:
                 process.terminate()
             else:
@@ -1087,6 +1524,11 @@ class BotManager:
                     process.kill()
                 else:
                     os.killpg(os.getpgid(pid), getattr(signal, "SIGKILL", signal.SIGTERM))
+                for child in child_processes:
+                    try:
+                        child.kill()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        pass
             except (ProcessLookupError, psutil.NoSuchProcess):
                 return stopped()
             except Exception as kill_error:

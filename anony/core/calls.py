@@ -3,6 +3,11 @@
 # This file is part of AnonXMusic
 
 
+import asyncio
+import time
+from collections import defaultdict
+from contextlib import asynccontextmanager
+
 from ntgcalls import (ConnectionNotFound, TelegramServerError,
                       RTMPStreamingUnsupported, ConnectionError)
 from pyrogram import raw
@@ -20,18 +25,66 @@ from anony.helpers import Media, Track, buttons
 class TgCall(PyTgCalls):
     def __init__(self):
         self.clients = []
+        self._locks = defaultdict(asyncio.Lock)
+        self._operations = {}
+        self._last_stream_end = {}
+        self.operation_timeout = 75
+
+    def active_operations(self) -> dict:
+        now = time.monotonic()
+        return {
+            str(chat_id): {
+                "stage": operation["stage"],
+                "seconds": round(now - operation["started"], 1),
+            }
+            for chat_id, operation in self._operations.items()
+        }
+
+    @asynccontextmanager
+    async def _operation(self, chat_id: int, stage: str):
+        async with self._locks[chat_id]:
+            started = time.monotonic()
+            self._operations[chat_id] = {"stage": stage, "started": started}
+            try:
+                yield
+            finally:
+                elapsed = time.monotonic() - started
+                self._operations.pop(chat_id, None)
+                if elapsed > 30:
+                    logger.warning(
+                        "Slow playback transition chat=%s stage=%s elapsed=%.1fs",
+                        chat_id,
+                        stage,
+                        elapsed,
+                    )
 
     async def pause(self, chat_id: int) -> bool:
-        client = await db.get_assistant(chat_id)
-        await db.playing(chat_id, paused=True)
-        return await client.pause(chat_id)
+        async with self._operation(chat_id, "pause"):
+            client = await db.get_assistant(chat_id)
+            await db.playing(chat_id, paused=True)
+            try:
+                return await asyncio.wait_for(client.pause(chat_id), self.operation_timeout)
+            except asyncio.TimeoutError:
+                await db.playing(chat_id, paused=False)
+                logger.error("Voice call pause timed out chat=%s", chat_id)
+                raise
 
     async def resume(self, chat_id: int) -> bool:
-        client = await db.get_assistant(chat_id)
-        await db.playing(chat_id, paused=False)
-        return await client.resume(chat_id)
+        async with self._operation(chat_id, "resume"):
+            client = await db.get_assistant(chat_id)
+            await db.playing(chat_id, paused=False)
+            try:
+                return await asyncio.wait_for(client.resume(chat_id), self.operation_timeout)
+            except asyncio.TimeoutError:
+                await db.playing(chat_id, paused=True)
+                logger.error("Voice call resume timed out chat=%s", chat_id)
+                raise
 
     async def stop(self, chat_id: int, leave_call: bool = True) -> None:
+        async with self._operation(chat_id, "stop"):
+            await self._stop(chat_id, leave_call)
+
+    async def _stop(self, chat_id: int, leave_call: bool = True) -> None:
         was_active = await db.get_call(chat_id)
         queue.clear(chat_id)
         await db.remove_call(chat_id)
@@ -42,7 +95,12 @@ class TgCall(PyTgCalls):
 
         client = await db.get_assistant(chat_id)
         try:
-            await client.leave_call(chat_id, close=False)
+            await asyncio.wait_for(
+                client.leave_call(chat_id, close=False),
+                timeout=self.operation_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Voice call leave timed out chat=%s", chat_id)
         except (ConnectionNotFound, exceptions.NoActiveGroupCall):
             logger.debug("Voice call %s was already closed.", chat_id)
         except Exception as exc:
@@ -50,13 +108,14 @@ class TgCall(PyTgCalls):
 
     async def has_active_group_call(self, chat_id: int) -> bool:
         try:
-            peer = await app.resolve_peer(chat_id)
+            peer = await asyncio.wait_for(app.resolve_peer(chat_id), timeout=30)
             channel = raw.types.InputChannel(
                 channel_id=peer.channel_id,
                 access_hash=peer.access_hash,
             )
-            full_chat = await app.invoke(
-                raw.functions.channels.GetFullChannel(channel=channel)
+            full_chat = await asyncio.wait_for(
+                app.invoke(raw.functions.channels.GetFullChannel(channel=channel)),
+                timeout=30,
             )
             return bool(getattr(full_chat.full_chat, "call", None))
         except Exception as exc:
@@ -65,6 +124,16 @@ class TgCall(PyTgCalls):
 
 
     async def play_media(
+        self,
+        chat_id: int,
+        message: Message,
+        media: Media | Track,
+        seek_time: int = 0,
+    ) -> None:
+        async with self._operation(chat_id, "play"):
+            await self._play_media(chat_id, message, media, seek_time)
+
+    async def _play_media(
         self,
         chat_id: int,
         message: Message,
@@ -81,10 +150,10 @@ class TgCall(PyTgCalls):
 
         if not media.file_path:
             await message.edit_text(_lang["error_no_file"].format(config.SUPPORT_CHAT))
-            return await self.play_next(chat_id)
+            return await self._play_next(chat_id)
 
         if not await self.has_active_group_call(chat_id):
-            await self.stop(chat_id, leave_call=False)
+            await self._stop(chat_id, leave_call=False)
             await message.edit_text(_lang["error_no_call"])
             return
 
@@ -101,10 +170,13 @@ class TgCall(PyTgCalls):
             ffmpeg_parameters=f"-ss {seek_time}" if seek_time > 1 else None,
         )
         try:
-            await client.play(
-                chat_id=chat_id,
-                stream=stream,
-                config=types.GroupCallConfig(auto_start=False),
+            await asyncio.wait_for(
+                client.play(
+                    chat_id=chat_id,
+                    stream=stream,
+                    config=types.GroupCallConfig(auto_start=False),
+                ),
+                timeout=self.operation_timeout,
             )
             if not seek_time:
                 media.time = 1
@@ -144,64 +216,86 @@ class TgCall(PyTgCalls):
                     media.message_id = sent.id
         except FileNotFoundError:
             await message.edit_text(_lang["error_no_file"].format(config.SUPPORT_CHAT))
-            await self.play_next(chat_id)
+            await self._play_next(chat_id)
         except exceptions.NoActiveGroupCall:
-            await self.stop(chat_id, leave_call=False)
+            await self._stop(chat_id, leave_call=False)
             await message.edit_text(_lang["error_no_call"])
         except exceptions.NoAudioSourceFound:
             await message.edit_text(_lang["error_no_audio"])
-            await self.play_next(chat_id)
+            await self._play_next(chat_id)
         except (ConnectionError, ConnectionNotFound, TelegramServerError):
-            await self.stop(chat_id, leave_call=False)
+            await self._stop(chat_id, leave_call=False)
             await message.edit_text(_lang["error_tg_server"])
         except RTMPStreamingUnsupported:
-            await self.stop(chat_id)
+            await self._stop(chat_id)
             await message.edit_text(_lang["error_rtmp"])
+        except asyncio.TimeoutError:
+            logger.error("Playback start timed out chat=%s", chat_id)
+            await self._stop(chat_id, leave_call=False)
+            raise
 
 
     async def replay(self, chat_id: int) -> None:
+        async with self._operation(chat_id, "replay"):
+            await self._replay(chat_id)
+
+    async def _replay(self, chat_id: int) -> None:
         if not await db.get_call(chat_id):
             return
 
         media = queue.get_current(chat_id)
+        if not media:
+            return await self._stop(chat_id)
         _lang = await lang.get_lang(chat_id)
         msg = await app.send_message(chat_id=chat_id, text=_lang["play_again"])
         media.message_id = msg.id
-        await self.play_media(chat_id, msg, media)
+        await self._play_media(chat_id, msg, media)
 
 
     async def play_next(self, chat_id: int) -> None:
+        async with self._operation(chat_id, "next"):
+            await self._play_next(chat_id)
+
+    async def _play_next(self, chat_id: int) -> None:
         if loop := await db.get_loop(chat_id):
             await db.set_loop(chat_id, loop - 1)
-            return await self.replay(chat_id)
+            return await self._replay(chat_id)
 
+        current = queue.get_current(chat_id)
         media = queue.get_next(chat_id)
         try:
-            if media.message_id:
+            if current and current.message_id:
                 await app.delete_messages(
                     chat_id=chat_id,
-                    message_ids=media.message_id,
+                    message_ids=current.message_id,
                     revoke=True,
                 )
-                media.message_id = 0
+                current.message_id = 0
         except Exception:
             pass
 
         if not media:
-            return await self.stop(chat_id)
+            return await self._stop(chat_id)
 
         _lang = await lang.get_lang(chat_id)
         msg = await app.send_message(chat_id=chat_id, text=_lang["play_next"])
         if not media.file_path:
-            media.file_path = await yt.download(media.id, video=media.video)
+            try:
+                media.file_path = await asyncio.wait_for(
+                    yt.download(media.id, video=media.video),
+                    timeout=180,
+                )
+            except asyncio.TimeoutError:
+                logger.error("Queued track download timed out chat=%s media=%s", chat_id, media.id)
+                media.file_path = None
             if not media.file_path:
-                await self.play_next(chat_id)
+                await self._play_next(chat_id)
                 return await msg.edit_text(
                     _lang["error_no_file"].format(config.SUPPORT_CHAT)
                 )
 
         media.message_id = msg.id
-        await self.play_media(chat_id, msg, media)
+        await self._play_media(chat_id, msg, media)
 
 
     async def ping(self) -> float:
@@ -216,6 +310,11 @@ class TgCall(PyTgCalls):
         async def update_handler(_, update: types.Update) -> None:
             if isinstance(update, types.StreamEnded):
                 if update.stream_type == types.StreamEnded.Type.AUDIO:
+                    now = time.monotonic()
+                    if now - self._last_stream_end.get(update.chat_id, 0) < 3:
+                        logger.debug("Ignoring duplicate stream-ended event chat=%s", update.chat_id)
+                        return
+                    self._last_stream_end[update.chat_id] = now
                     await self.play_next(update.chat_id)
             elif isinstance(update, types.ChatUpdate):
                 if update.status in [

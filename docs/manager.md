@@ -40,6 +40,7 @@ pm2 start "python3 manager.py" --name world
 /stop <name>
 /delete <name>
 /restart <name>
+/logs <name>
 ```
 
 `/delete` stops the deployment if needed, permanently removes its deployment directory, and removes it from the manager store.
@@ -57,6 +58,18 @@ pm2 start "python3 manager.py" --name world
 `/changedb` safely stops the specified deployment, switches only its `DB_NAME`, and starts it again. It does not copy, migrate, or delete data from either database.
 
 `/restart <name>` restarts only the specified deployed bot. It does not restart the manager.
+
+`/logs <name>` sends a sanitized copy of the deployment's full run log.
+
+## Health Monitoring
+
+Deployed bots write a heartbeat every 15 seconds. The manager detects a process that
+still exists but no longer responds, captures diagnostics, and restarts it automatically.
+Automatic recovery stops after three attempts within one hour and sends an urgent alert.
+Intentional `/stop` commands never trigger automatic recovery.
+
+Existing deployments are not restarted when the manager is upgraded or restarted.
+Heartbeat monitoring activates for them after their next manual or normal deployment restart.
 
 ## Deployment Setup Flow
 
