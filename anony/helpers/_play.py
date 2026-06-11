@@ -49,7 +49,14 @@ def checkUB(play):
                 return await m.reply_text(m.lang["play_admin"])
 
         if chat_id not in db.active_calls:
-            client = await db.get_client(chat_id)
+            try:
+                client = await db.get_client(chat_id)
+            except Exception:
+                logger.exception("Could not select an assistant for chat %s", chat_id)
+                return await m.reply_text(
+                    "❌ No connected assistant session is available for playback.\n\n"
+                    "💡 Check <code>/sessions</code>, then restart the deployed bot if a configured session is offline."
+                )
             try:
                 member = await app.get_chat_member(chat_id, client.id)
                 if member.status in [

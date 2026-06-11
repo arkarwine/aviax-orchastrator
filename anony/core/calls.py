@@ -334,6 +334,7 @@ class TgCall(PyTgCalls):
     async def add_client(self, ub) -> None:
         PyTgCallsSession.notice_displayed = True
         client = PyTgCalls(ub, cache_duration=100)
+        client.session_slot = ub.session_slot
         await client.start()
         self.clients.append(client)
         await self.decorators(client)

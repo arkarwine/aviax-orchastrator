@@ -3,7 +3,7 @@
 # This file is part of AnonXMusic
 
 
-from random import randint
+from random import choice
 from time import time
 
 from pymongo import AsyncMongoClient
@@ -119,7 +119,10 @@ class MongoDB:
 
     # ASSISTANT METHODS
     async def set_assistant(self, chat_id: int) -> int:
-        num = randint(1, len(userbot.clients))
+        slots = userbot.available_slots()
+        if not slots:
+            raise RuntimeError("No connected assistant sessions are available.")
+        num = choice(slots)
         await self.assistantdb.update_one(
             {"_id": chat_id},
             {"$set": {"num": num}},
@@ -136,14 +139,24 @@ class MongoDB:
             num = doc["num"] if doc else await self.set_assistant(chat_id)
             self.assistant[chat_id] = num
 
-        return anon.clients[self.assistant[chat_id] - 1]
+        slot = self.assistant[chat_id]
+        client = next(
+            (
+                client
+                for client in anon.clients
+                if getattr(client, "session_slot", None) == slot
+            ),
+            None,
+        )
+        if client:
+            return client
+
+        await self.set_assistant(chat_id)
+        return await self.get_assistant(chat_id)
 
     async def get_client(self, chat_id: int):
-        if chat_id not in self.assistant:
-            await self.get_assistant(chat_id)
-        return {1: userbot.one, 2: userbot.two, 3: userbot.three}.get(
-            self.assistant[chat_id]
-        )
+        await self.get_assistant(chat_id)
+        return userbot.client_for_slot(self.assistant[chat_id])
 
     # BLACKLIST METHODS
     async def add_blacklist(self, chat_id: int) -> None:

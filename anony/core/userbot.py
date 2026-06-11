@@ -21,6 +21,20 @@ class Userbot(Client):
         self.clients = []
         self.reload_from_config()
 
+    def available_slots(self) -> list[int]:
+        return [
+            slot
+            for slot, key in enumerate(("SESSION1", "SESSION2", "SESSION3"), start=1)
+            if getattr(config, key) and self.client_for_slot(slot) in self.clients
+        ]
+
+    def client_for_slot(self, slot: int) -> Client | None:
+        return {
+            1: self.one,
+            2: self.two,
+            3: self.three,
+        }.get(slot)
+
     def reload_from_config(self) -> None:
         clients = (("one", "SESSION1"), ("two", "SESSION2"), ("three", "SESSION3"))
         for num, (key, string_key) in enumerate(clients, start=1):
@@ -69,6 +83,7 @@ class Userbot(Client):
         client.name = ub.me.first_name
         client.username = ub.me.username
         client.mention = ub.me.mention
+        client.session_slot = num
         self.clients.append(client)
 
         logger.info(f"Assistant {num} started as @{client.username}")
