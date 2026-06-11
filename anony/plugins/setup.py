@@ -291,8 +291,8 @@ async def _edit_session(_, m: types.Message):
 @app.on_message(filters.command(["removesession", "delsession"]) & filters.private & ~app.bl_users)
 @lang.language()
 async def _remove_session(_, m: types.Message):
-    if m.from_user.id != app.owner:
-        return await m.reply_text("🔒 Only the deployment owner can remove assistant sessions.")
+    if m.from_user.id not in app.sudoers:
+        return await m.reply_text("🔒 You need sudo access to remove assistant sessions.")
 
     if len(m.command) < 2 or m.command[1] not in {"1", "2", "3"}:
         slots = "\n".join(
@@ -332,6 +332,44 @@ async def _remove_session(_, m: types.Message):
     await status.edit_text(
         f"✅ Assistant session slot <code>{slot}</code> was removed."
         f"{warning}\n\n🔄 Run <code>/restart</code> to disconnect it and rebuild the assistant clients."
+    )
+
+
+@app.on_message(filters.command(["sessions", "viewsessions"]) & filters.private & ~app.bl_users)
+@lang.language()
+async def _view_sessions(_, m: types.Message):
+    if m.from_user.id not in app.sudoers:
+        return await m.reply_text("🔒 You need sudo access to view assistant sessions.")
+
+    lines = []
+    configured = 0
+    online = 0
+    for slot, attr in enumerate(("one", "two", "three"), start=1):
+        if not getattr(config, f"SESSION{slot}"):
+            lines.append(f"⚪ Slot {slot}: empty")
+            continue
+
+        configured += 1
+        client = getattr(userbot, attr)
+        if client in userbot.clients:
+            online += 1
+            name = escape(
+                getattr(client, "name", None)
+                or getattr(client, "username", None)
+                or str(getattr(client, "id", slot))
+            )
+            username = getattr(client, "username", None)
+            identity = f"@{escape(username)}" if username else name
+            lines.append(f"🟢 Slot {slot}: {identity} — connected")
+        else:
+            lines.append(f"🟡 Slot {slot}: configured — offline/restart required")
+
+    await m.reply_text(
+        "<b>👥 Assistant Sessions</b>\n\n"
+        + "\n".join(lines)
+        + f"\n\n🔐 Configured: <code>{configured}/3</code>"
+        + f"\n⚡ Connected: <code>{online}/{configured}</code>"
+        + "\n\n🔒 Session strings are hidden."
     )
 
 

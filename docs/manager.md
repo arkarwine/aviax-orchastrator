@@ -101,7 +101,7 @@ Assistant sessions can be removed by slot:
 /removesession <1|2|3>
 ```
 
-Restart the deployed bot after removing a session to disconnect it and rebuild the assistant clients.
+Owners and sudo users can view configured session slots with `/sessions` and remove them with `/removesession`. Session strings are never displayed. Restart the deployed bot after removing a session to disconnect it and rebuild the assistant clients.
 
 ## Isolation Rules
 
