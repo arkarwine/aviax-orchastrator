@@ -25,6 +25,10 @@ def is_owner(user_id: int) -> bool:
     return bool(user_id and (user_id == app.owner or user_id in app.sudoers))
 
 
+def has_assistant_session() -> bool:
+    return any((config.SESSION1, config.SESSION2, config.SESSION3))
+
+
 async def claim_owner(user: types.User) -> bool:
     if config.OWNER_ID or not user:
         return False
@@ -48,7 +52,7 @@ async def claim_owner(user: types.User) -> bool:
 
 
 def setup_complete() -> bool:
-    return bool(config.OWNER_ID and config.LOGGER_ID and config.SESSION1)
+    return bool(config.OWNER_ID and config.LOGGER_ID and has_assistant_session())
 
 
 def setup_text() -> str:
@@ -59,7 +63,7 @@ def setup_text() -> str:
             "<b>📝 Setup step 1</b>\n\n"
             "Create a log group, add this bot, promote it as admin, then run <code>/setlog</code> in that group."
         )
-    if not config.SESSION1:
+    if not has_assistant_session():
         return (
             "<b>🔐 Setup step 2</b>\n\n"
             "Connect an assistant user account with <code>/addsession</code> in private chat."
@@ -133,7 +137,7 @@ async def _set_log_group(_, m: types.Message):
     config.apply_runtime_config({"LOGGER_ID": m.chat.id})
     app.logger = m.chat.id
     started = 0
-    if any([config.SESSION1, config.SESSION2, config.SESSION3]) and not userbot.clients:
+    if has_assistant_session() and not userbot.clients:
         await status.edit_text("🚀 Log group saved. Starting stored assistant session(s)...")
         try:
             await userbot.boot()
@@ -146,10 +150,13 @@ async def _set_log_group(_, m: types.Message):
                 "⚠️ The log group was saved, but stored assistants could not start.\n\n"
                 "💡 Make sure they can send messages here, then restart the deployment."
             )
+    message = "✅ Log group configured. I can write logs here now."
+    if started:
+        message += f"\n\nStarted {started} stored assistant session(s)."
+    if has_assistant_session():
+        return await status.edit_text(message + "\n\n✨ Required setup is complete.")
     await status.edit_text(
-        "✅ Log group configured. I can write logs here now."
-        + (f"\n\nStarted {started} stored assistant session(s)." if started else "")
-        + "\n\n➡️ Next: connect an assistant user account in private chat.",
+        message + "\n\n➡️ Next: connect an assistant user account in private chat.",
         reply_markup=buttons.setup_next_session(),
     )
 
