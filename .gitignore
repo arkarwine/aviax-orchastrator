@@ -6,6 +6,7 @@ __pycache__/
 .env
 manager.env
 manager_deployments.json
+manager_sudoers.json
 
 *.session
 *.session-journal

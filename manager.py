@@ -28,6 +28,7 @@ import psutil
 ROOT = Path(__file__).resolve().parent
 MANAGER_ENV = ROOT / "manager.env"
 STORE_PATH = ROOT / "manager_deployments.json"
+SUDO_STORE_PATH = ROOT / "manager_sudoers.json"
 DEPLOYMENT_ENV_KEYS = {
     "API_ID",
     "API_HASH",
@@ -109,6 +110,17 @@ class ManagerConfig:
             for value in re.split(r"[\s,]+", os.getenv("MANAGER_SUDOERS", "").strip())
             if value.isdigit() and int(value) > 0
         }
+        try:
+            stored_sudoers = json.loads(SUDO_STORE_PATH.read_text(encoding="utf-8"))
+            sudoers = {
+                int(value)
+                for value in stored_sudoers.get("sudoers", [])
+                if str(value).isdigit() and int(value) > 0
+            }
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, TypeError):
+            logger.warning("Could not load manager sudoers from %s.", SUDO_STORE_PATH)
         sudoers.discard(owner_id)
         default_mongo_url = os.getenv("MANAGER_DEFAULT_MONGO_URL")
         deployments_dir = Path(os.getenv("DEPLOYMENTS_DIR", "deployments")).resolve()
@@ -343,19 +355,23 @@ class BotManager:
             self.config.deployments_dir,
         )
 
-        authorized = filters.user(self.config.authorized_users)
-        self.app.on_message(filters.private & filters.command("start") & authorized)(self.start)
-        self.app.on_message(filters.private & filters.command("help") & authorized)(self.help)
-        self.app.on_message(filters.private & filters.command("newbot") & authorized)(self.newbot)
-        self.app.on_message(filters.private & filters.command(["reconfigure", "rebuild"]) & authorized)(self.reconfigure)
-        self.app.on_message(filters.private & filters.command(["changedb", "switchdb"]) & authorized)(self.change_database)
-        self.app.on_message(filters.private & filters.command("list") & authorized)(self.list_bots)
-        self.app.on_message(filters.private & filters.command("status") & authorized)(self.status)
-        self.app.on_message(filters.private & filters.command("deploy") & authorized)(self.deploy)
-        self.app.on_message(filters.private & filters.command("stop") & authorized)(self.stop)
-        self.app.on_message(filters.private & filters.command("delete") & authorized)(self.delete)
-        self.app.on_message(filters.private & filters.command("restart") & authorized)(self.restart)
-        self.app.on_message(filters.private & filters.command("logs") & authorized)(self.logs)
+        self.authorized_filter = filters.user(self.config.authorized_users)
+        owner = filters.user(self.config.owner_id)
+        self.app.on_message(filters.private & filters.command("start") & self.authorized_filter)(self.start)
+        self.app.on_message(filters.private & filters.command("help") & self.authorized_filter)(self.help)
+        self.app.on_message(filters.private & filters.command("newbot") & self.authorized_filter)(self.newbot)
+        self.app.on_message(filters.private & filters.command(["reconfigure", "rebuild"]) & self.authorized_filter)(self.reconfigure)
+        self.app.on_message(filters.private & filters.command(["changedb", "switchdb"]) & self.authorized_filter)(self.change_database)
+        self.app.on_message(filters.private & filters.command("list") & self.authorized_filter)(self.list_bots)
+        self.app.on_message(filters.private & filters.command("status") & self.authorized_filter)(self.status)
+        self.app.on_message(filters.private & filters.command("deploy") & self.authorized_filter)(self.deploy)
+        self.app.on_message(filters.private & filters.command("stop") & self.authorized_filter)(self.stop)
+        self.app.on_message(filters.private & filters.command("delete") & self.authorized_filter)(self.delete)
+        self.app.on_message(filters.private & filters.command("restart") & self.authorized_filter)(self.restart)
+        self.app.on_message(filters.private & filters.command("logs") & self.authorized_filter)(self.logs)
+        self.app.on_message(filters.private & filters.command("sudolist") & self.authorized_filter)(self.sudolist)
+        self.app.on_message(filters.private & filters.command("addsudo") & owner)(self.addsudo)
+        self.app.on_message(filters.private & filters.command(["delsudo", "rmsudo"]) & owner)(self.delsudo)
 
     @handler_errors
     async def start(self, client: Client, message: Message) -> None:
@@ -378,9 +394,99 @@ class BotManager:
             "⏹️ /stop &lt;name&gt; - Stop a running deployment.\n"
             "🗑️ /delete &lt;name&gt; - Permanently delete a deployment.\n"
             "🔄 /restart &lt;name&gt; - Restart a deployed bot.\n"
-            "📄 /logs &lt;name&gt; - Retrieve a deployment's full log.\n",
+            "📄 /logs &lt;name&gt; - Retrieve a deployment's full log.\n"
+            "👥 /sudolist - View manager owner and sudo users.\n"
+            "➕ /addsudo &lt;user_id&gt; - Grant manager access. Owner only.\n"
+            "➖ /delsudo &lt;user_id&gt; - Remove manager access. Owner only.\n",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
+
+    def save_sudoers(self) -> None:
+        temporary = SUDO_STORE_PATH.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps({"sudoers": sorted(self.config.sudoers)}, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(SUDO_STORE_PATH)
+
+    @handler_errors
+    async def sudolist(self, client: Client, message: Message) -> None:
+        lines = [
+            "<b>👥 Manager Access</b>",
+            f"\n👑 Owner: <code>{self.config.owner_id}</code>",
+        ]
+        if self.config.sudoers:
+            lines.append("\n<b>🛡️ Sudo users</b>")
+            lines.extend(f"• <code>{user_id}</code>" for user_id in sorted(self.config.sudoers))
+        else:
+            lines.append("\n📭 No additional sudo users.")
+        await message.reply_text(
+            "\n".join(lines),
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+
+    @handler_errors
+    async def addsudo(self, client: Client, message: Message) -> None:
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2 or not args[1].strip().isdigit() or int(args[1]) <= 0:
+            return await message.reply_text(
+                "➕ Usage: <code>/addsudo &lt;telegram_user_id&gt;</code>",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        user_id = int(args[1])
+        if user_id == self.config.owner_id:
+            return await message.reply_text("👑 The manager owner already has full access.")
+        if user_id in self.config.sudoers:
+            return await message.reply_text(f"🛡️ <code>{user_id}</code> is already a manager sudo user.")
+
+        try:
+            user = await client.get_users(user_id)
+            if user.is_bot:
+                return await message.reply_text("❌ Bot accounts cannot be manager sudo users.")
+        except Exception:
+            user = None
+
+        self.config.sudoers.add(user_id)
+        self.authorized_filter.add(user_id)
+        try:
+            self.save_sudoers()
+        except OSError:
+            self.config.sudoers.discard(user_id)
+            self.authorized_filter.discard(user_id)
+            raise
+        label = (
+            f"<b>{html.escape(user.first_name or str(user_id))}</b> "
+            f"(<code>{user_id}</code>)"
+            if user
+            else f"<code>{user_id}</code>"
+        )
+        await message.reply_text(f"✅ Added {label} as a manager sudo user.")
+
+    @handler_errors
+    async def delsudo(self, client: Client, message: Message) -> None:
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2 or not args[1].strip().isdigit() or int(args[1]) <= 0:
+            return await message.reply_text(
+                "➖ Usage: <code>/delsudo &lt;telegram_user_id&gt;</code>",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        user_id = int(args[1])
+        if user_id == self.config.owner_id:
+            return await message.reply_text("👑 The manager owner cannot be removed from access.")
+        if user_id not in self.config.sudoers:
+            return await message.reply_text(f"📭 <code>{user_id}</code> is not a manager sudo user.")
+
+        self.config.sudoers.discard(user_id)
+        self.authorized_filter.discard(user_id)
+        try:
+            self.save_sudoers()
+        except OSError:
+            self.config.sudoers.add(user_id)
+            self.authorized_filter.add(user_id)
+            raise
+        await message.reply_text(f"✅ Removed <code>{user_id}</code> from manager sudo users.")
 
     @handler_errors
     async def list_bots(self, client: Client, message: Message) -> None:
