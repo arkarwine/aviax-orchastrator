@@ -12,6 +12,7 @@ manager_deployments.json
 log.txt
 run.log
 .health.json
+.manager-launch.pid
 
 cache/
 downloads/

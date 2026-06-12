@@ -92,6 +92,7 @@ class ManagerConfig:
     api_hash: str
     bot_token: str
     owner_id: int
+    sudoers: set[int]
     default_mongo_url: Optional[str]
     deployments_dir: Path
     template_path: Path
@@ -103,6 +104,12 @@ class ManagerConfig:
         api_hash = os.getenv("MANAGER_API_HASH", "")
         bot_token = os.getenv("MANAGER_BOT_TOKEN", "")
         owner_id = int(os.getenv("MANAGER_OWNER_ID", "0"))
+        sudoers = {
+            int(value)
+            for value in re.split(r"[\s,]+", os.getenv("MANAGER_SUDOERS", "").strip())
+            if value.isdigit() and int(value) > 0
+        }
+        sudoers.discard(owner_id)
         default_mongo_url = os.getenv("MANAGER_DEFAULT_MONGO_URL")
         deployments_dir = Path(os.getenv("DEPLOYMENTS_DIR", "deployments")).resolve()
         template_path = Path(os.getenv("TEMPLATE_PATH", ".")).resolve()
@@ -126,11 +133,16 @@ class ManagerConfig:
             api_hash=api_hash,
             bot_token=bot_token,
             owner_id=owner_id,
+            sudoers=sudoers,
             default_mongo_url=default_mongo_url,
             deployments_dir=deployments_dir,
             template_path=template_path,
             api_key=api_key,
         )
+
+    @property
+    def authorized_users(self) -> list[int]:
+        return sorted({self.owner_id, *self.sudoers})
 
 
 @dataclass
@@ -146,6 +158,7 @@ class DeploymentMeta:
     started_at: Optional[str] = None
     process_created_at: Optional[float] = None
     desired_running: bool = False
+    intentionally_stopped: bool = False
     restart_history: list[str] = field(default_factory=list)
     last_failure: Optional[str] = None
 
@@ -158,6 +171,7 @@ class DeploymentMeta:
     def from_dict(cls, data: Dict[str, Any]) -> "DeploymentMeta":
         values = dict(data)
         values.setdefault("desired_running", bool(values.get("pid")))
+        values.setdefault("intentionally_stopped", not values["desired_running"])
         values.setdefault("restart_history", [])
         return cls(**values)
 
@@ -322,20 +336,26 @@ class BotManager:
             api_hash=self.config.api_hash,
             bot_token=self.config.bot_token,
         )
-        logger.info("Manager bot configured for owner_id=%s and deployments_dir=%s", self.config.owner_id, self.config.deployments_dir)
+        logger.info(
+            "Manager bot configured for owner_id=%s, sudoers=%d, and deployments_dir=%s",
+            self.config.owner_id,
+            len(self.config.sudoers),
+            self.config.deployments_dir,
+        )
 
-        self.app.on_message(filters.private & filters.command("start") & filters.user(self.config.owner_id))(self.start)
-        self.app.on_message(filters.private & filters.command("help") & filters.user(self.config.owner_id))(self.help)
-        self.app.on_message(filters.private & filters.command("newbot") & filters.user(self.config.owner_id))(self.newbot)
-        self.app.on_message(filters.private & filters.command(["reconfigure", "rebuild"]) & filters.user(self.config.owner_id))(self.reconfigure)
-        self.app.on_message(filters.private & filters.command(["changedb", "switchdb"]) & filters.user(self.config.owner_id))(self.change_database)
-        self.app.on_message(filters.private & filters.command("list") & filters.user(self.config.owner_id))(self.list_bots)
-        self.app.on_message(filters.private & filters.command("status") & filters.user(self.config.owner_id))(self.status)
-        self.app.on_message(filters.private & filters.command("deploy") & filters.user(self.config.owner_id))(self.deploy)
-        self.app.on_message(filters.private & filters.command("stop") & filters.user(self.config.owner_id))(self.stop)
-        self.app.on_message(filters.private & filters.command("delete") & filters.user(self.config.owner_id))(self.delete)
-        self.app.on_message(filters.private & filters.command("restart") & filters.user(self.config.owner_id))(self.restart)
-        self.app.on_message(filters.private & filters.command("logs") & filters.user(self.config.owner_id))(self.logs)
+        authorized = filters.user(self.config.authorized_users)
+        self.app.on_message(filters.private & filters.command("start") & authorized)(self.start)
+        self.app.on_message(filters.private & filters.command("help") & authorized)(self.help)
+        self.app.on_message(filters.private & filters.command("newbot") & authorized)(self.newbot)
+        self.app.on_message(filters.private & filters.command(["reconfigure", "rebuild"]) & authorized)(self.reconfigure)
+        self.app.on_message(filters.private & filters.command(["changedb", "switchdb"]) & authorized)(self.change_database)
+        self.app.on_message(filters.private & filters.command("list") & authorized)(self.list_bots)
+        self.app.on_message(filters.private & filters.command("status") & authorized)(self.status)
+        self.app.on_message(filters.private & filters.command("deploy") & authorized)(self.deploy)
+        self.app.on_message(filters.private & filters.command("stop") & authorized)(self.stop)
+        self.app.on_message(filters.private & filters.command("delete") & authorized)(self.delete)
+        self.app.on_message(filters.private & filters.command("restart") & authorized)(self.restart)
+        self.app.on_message(filters.private & filters.command("logs") & authorized)(self.logs)
 
     @handler_errors
     async def start(self, client: Client, message: Message) -> None:
@@ -467,10 +487,14 @@ class BotManager:
 
         if not deployment.is_running:
             deployment.desired_running = False
+            deployment.intentionally_stopped = True
+            self.stale_health_counts.pop(name, None)
             self.store.update(deployment)
             return await message.reply_text(f"⚫ Deployment <b>{name}</b> is already stopped.", reply_parameters=ReplyParameters(message_id=message.id))
 
         deployment.desired_running = False
+        deployment.intentionally_stopped = True
+        self.stale_health_counts.pop(name, None)
         self.store.update(deployment)
         stopped, error = self.stop_process(deployment)
         if stopped:
@@ -1247,10 +1271,16 @@ class BotManager:
 
     def recover_deployment(self, deployment: DeploymentMeta, reason: str) -> None:
         with self.recovery_guard:
-            if deployment.name in self.recovering:
+            if (
+                deployment.name in self.recovering
+                or deployment.intentionally_stopped
+                or not deployment.desired_running
+            ):
                 return
             self.recovering.add(deployment.name)
         try:
+            if deployment.intentionally_stopped or not deployment.desired_running:
+                return
             recent = self.recent_recoveries(deployment)
             if len(recent) >= self.recovery_limit:
                 if deployment.name in self.failed_restarts:
@@ -1278,7 +1308,7 @@ class BotManager:
                 deployment.pid = None
                 deployment.process_created_at = None
 
-            if not deployment.desired_running:
+            if deployment.intentionally_stopped or not deployment.desired_running:
                 self.store.update(deployment)
                 self._notify_owner(
                     report
@@ -1291,12 +1321,14 @@ class BotManager:
             started, error = self.start_process(deployment, mark_desired=False)
             self.store.update(deployment)
             if not started:
+                if deployment.intentionally_stopped or not deployment.desired_running:
+                    return
                 self._notify_owner(
                     report
                     + f"\n\n❌ Automatic restart failed. Use <code>/deploy {deployment.name}</code> after checking the logs."
                 )
                 return
-            if not deployment.desired_running:
+            if deployment.intentionally_stopped or not deployment.desired_running:
                 self.stop_process(deployment)
                 self.store.update(deployment)
                 self._notify_owner(
@@ -1319,7 +1351,7 @@ class BotManager:
                 if not self.process_matches(deployment):
                     break
             self.store.update(deployment)
-            if not deployment.desired_running:
+            if deployment.intentionally_stopped or not deployment.desired_running:
                 self._notify_owner(
                     report
                     + f"\n\n⏹️ Automatic recovery for <b>{deployment.name}</b> ended because it was stopped intentionally."
@@ -1403,6 +1435,9 @@ class BotManager:
                         reason,
                     )
                     if confirmations >= self.health_confirmations:
+                        if deployment.intentionally_stopped or not deployment.desired_running:
+                            self.stale_health_counts.pop(deployment.name, None)
+                            continue
                         threading.Thread(
                             target=self.recover_deployment,
                             args=(deployment, reason),
@@ -1418,6 +1453,15 @@ class BotManager:
         *,
         mark_desired: bool = True,
     ) -> tuple[bool, Optional[str]]:
+        if not mark_desired and (
+            deployment.intentionally_stopped or not deployment.desired_running
+        ):
+            logger.info(
+                "Refusing automatic start for intentionally stopped deployment %s.",
+                deployment.name,
+            )
+            return False, "Deployment was intentionally stopped."
+
         env = os.environ.copy()
         for key in DEPLOYMENT_ENV_KEYS:
             env.pop(key, None)
@@ -1435,32 +1479,77 @@ class BotManager:
 
         log_file = deployment.deployment_path / "run.log"
         health_file = deployment.deployment_path / ".health.json"
+        launch_pid_file = deployment.deployment_path / ".manager-launch.pid"
         try:
             health_file.unlink(missing_ok=True)
+            launch_pid_file.unlink(missing_ok=True)
         except OSError:
-            logger.warning("Could not remove stale health file for %s", deployment.name)
+            logger.warning("Could not remove stale launch files for %s", deployment.name)
         logger.info("Starting deployment %s at %s", deployment.name, deployment.deployment_path)
         try:
-            with open(os.devnull, "rb") as stdin, log_file.open("a", encoding="utf-8") as stdout:
-                process = subprocess.Popen(
-                    [sys.executable, "-m", "anony"],
-                    cwd=deployment.deployment_path,
+            if os.name == "posix":
+                launcher = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "deployment_launcher.py"),
+                        "--cwd",
+                        str(deployment.deployment_path),
+                        "--log",
+                        str(log_file),
+                        "--pid-file",
+                        str(launch_pid_file),
+                    ],
+                    cwd=ROOT,
                     env=env,
-                    stdin=stdin,
-                    stdout=stdout,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=os.name == "posix",
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=15,
                 )
-            deployment.pid = process.pid
-            self.processes[deployment.name] = process
+                if launcher.returncode != 0:
+                    raise RuntimeError(
+                        launcher.stderr.strip() or "detached deployment launcher failed"
+                    )
+                deployment.pid = int(launch_pid_file.read_text(encoding="ascii").strip())
+                launch_pid_file.unlink(missing_ok=True)
+            else:
+                with open(os.devnull, "rb") as stdin, log_file.open("a", encoding="utf-8") as stdout:
+                    process = subprocess.Popen(
+                        [sys.executable, "-m", "anony"],
+                        cwd=deployment.deployment_path,
+                        env=env,
+                        stdin=stdin,
+                        stdout=stdout,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=os.name == "posix",
+                    )
+                deployment.pid = process.pid
+                self.processes[deployment.name] = process
+
             deployment.process_created_at = psutil.Process(deployment.pid).create_time()
+            if not mark_desired and (
+                deployment.intentionally_stopped or not deployment.desired_running
+            ):
+                logger.info(
+                    "Cancelling automatic start for intentionally stopped deployment %s.",
+                    deployment.name,
+                )
+                self.stop_process(deployment)
+                return False, "Deployment was intentionally stopped."
+
             if mark_desired:
                 deployment.desired_running = True
+                deployment.intentionally_stopped = False
             deployment.started_at = datetime.now(timezone.utc).isoformat()
             self.failed_restarts.discard(deployment.name)
             logger.info("Deployment %s started with pid=%s", deployment.name, deployment.pid)
             return True, None
         except Exception as exc:
+            try:
+                launch_pid_file.unlink(missing_ok=True)
+            except OSError:
+                pass
             error_text = str(exc)
             logger.error("Failed to start deployment %s: %s", deployment.name, error_text)
             return False, error_text

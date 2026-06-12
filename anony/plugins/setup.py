@@ -52,25 +52,22 @@ async def claim_owner(user: types.User) -> bool:
 
 
 def setup_complete() -> bool:
-    return bool(config.OWNER_ID and config.LOGGER_ID and has_assistant_session())
+    return bool(config.OWNER_ID and has_assistant_session())
 
 
 def setup_text() -> str:
     if not config.OWNER_ID:
         return "👋 Send <code>/start</code> in private chat to claim this deployment."
-    if not config.LOGGER_ID:
-        return (
-            "<b>📝 Setup step 1</b>\n\n"
-            "Create a log group, add this bot, promote it as admin, then run <code>/setlog</code> in that group."
-        )
     if not has_assistant_session():
         return (
-            "<b>🔐 Setup step 2</b>\n\n"
+            "<b>🔐 Setup step 1</b>\n\n"
             "Connect an assistant user account with <code>/addsession</code> in private chat."
         )
     return (
-        "<b>✨ Setup step 3</b>\n\n"
-        "Optional: set <code>/support &lt;link&gt;</code>, <code>/updates &lt;link&gt;</code>, and <code>/langcode &lt;code&gt;</code>."
+        "<b>✨ Required setup is complete</b>\n\n"
+        "Optional: configure a log group with <code>/setlog</code>, then set "
+        "<code>/support &lt;link&gt;</code>, <code>/updates &lt;link&gt;</code>, "
+        "and <code>/langcode &lt;code&gt;</code>."
     )
 
 
@@ -148,7 +145,7 @@ async def _set_log_group(_, m: types.Message):
             logger.exception("Stored assistants could not start after setting log group")
             return await status.edit_text(
                 "⚠️ The log group was saved, but stored assistants could not start.\n\n"
-                "💡 Make sure they can send messages here, then restart the deployment."
+                "💡 Check the assistant sessions, then restart the deployment."
             )
     message = "✅ Log group configured. I can write logs here now."
     if started:
@@ -383,10 +380,6 @@ async def _view_sessions(_, m: types.Message):
 async def begin_session_setup(m: types.Message, session_string: str | None = None):
     if not is_owner(m.from_user.id):
         return await m.reply_text("🔒 Only the deployment owner can add assistant sessions.")
-    if not config.LOGGER_ID:
-        return await m.reply_text(
-            "📝 Set the log group first with <code>/setlog</code>.\n\n💡 Assistants must be able to send a startup message there."
-        )
     if all([config.SESSION1, config.SESSION2, config.SESSION3]):
         return await m.reply_text("✅ All three assistant session slots are already configured.")
 
@@ -637,14 +630,14 @@ async def _save_session_string(
         session_setup.pop(m.from_user.id, None)
         return await status.edit_text(
             "⚠️ The assistant session was saved, but it could not start.\n\n"
-            "💡 Make sure the assistant can send messages in the log group, then restart the deployment."
+            "💡 Check the assistant account session, then restart the deployment."
         )
     except Exception:
         logger.exception("Saved assistant session could not start")
         session_setup.pop(m.from_user.id, None)
         return await status.edit_text(
             "⚠️ The assistant session was saved, but it could not start.\n\n"
-            "💡 Check the log group access and Telegram login state, then restart the deployment."
+            "💡 Check the Telegram login state, then restart the deployment."
         )
 
     await status.edit_text("🎙️ Connecting assistant to the voice call engine...")

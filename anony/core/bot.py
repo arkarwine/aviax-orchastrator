@@ -30,12 +30,7 @@ class Bot(pyrogram.Client):
         self.sudoers = pyrogram.filters.user(self.owner)
 
     async def boot(self):
-        """
-        Starts the bot and performs initial setup.
-
-        Raises:
-            SystemExit: If the bot fails to access the log group or is not an administrator in the logger group.
-        """
+        """Start the bot and enable optional log-group delivery when available."""
         await super().start()
         self.id = self.me.id
         self.name = self.me.first_name
@@ -54,10 +49,21 @@ class Bot(pyrogram.Client):
             await self.send_message(self.logger, "Bot Started")
             get = await self.get_chat_member(self.logger, self.id)
         except Exception as ex:
-            raise SystemExit(f"Bot has failed to access the log group: {self.logger}\nReason: {ex}")
+            logger.warning(
+                "Configured log group %s is unreachable; continuing with logging disabled: %s",
+                self.logger,
+                ex,
+            )
+            self.logger = 0
+            logger.info(f"Bot started as @{self.username}")
+            return
 
         if get.status != pyrogram.enums.ChatMemberStatus.ADMINISTRATOR:
-            raise SystemExit("Please promote the bot as an admin in logger group.")
+            logger.warning(
+                "Bot is not an administrator in configured log group %s; continuing with logging disabled.",
+                self.logger,
+            )
+            self.logger = 0
         logger.info(f"Bot started as @{self.username}")
 
     async def exit(self):

@@ -49,7 +49,7 @@ SUDO_PRIVATE_COMMANDS = PUBLIC_PRIVATE_COMMANDS + [
     ("unblacklist", "Unblock a chat or user"),
     ("sudolist", "View owner and sudo users"),
     ("setup", "View deployment setup status"),
-    ("setlog", "Configure the log group"),
+    ("setlog", "Configure the optional log group"),
     ("support", "Configure the support group"),
     ("updates", "Configure the updates channel"),
     ("langcode", "Configure the default language"),

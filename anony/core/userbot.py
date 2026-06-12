@@ -59,14 +59,7 @@ class Userbot(Client):
         )
 
     async def boot_client(self, num: int, ub: Client):
-        """
-        Boot a client and perform initial setup.
-        Args:
-            num (int): The client number to boot (1, 2, or 3).
-            ub (Client): The userbot client instance.
-        Raises:
-            SystemExit: If the client fails to send a message in the log group.
-        """
+        """Boot an assistant and optionally announce it in the configured log group."""
         clients = {
             1: self.one,
             2: self.two,
@@ -74,10 +67,16 @@ class Userbot(Client):
         }
         client = clients[num]
         await client.start()
-        try:
-            await client.send_message(config.LOGGER_ID, "Assistant Started")
-        except Exception as e:
-            raise SystemExit(f"Assistant {num} failed to send message in log group.\n\nError: {e}")
+        if config.LOGGER_ID:
+            try:
+                await client.send_message(config.LOGGER_ID, "Assistant Started")
+            except Exception as exc:
+                logger.warning(
+                    "Assistant %s could not reach optional log group %s: %s",
+                    num,
+                    config.LOGGER_ID,
+                    exc,
+                )
 
         client.id = ub.me.id
         client.name = ub.me.first_name
@@ -109,9 +108,6 @@ class Userbot(Client):
         """
         Asynchronously starts the assistants.
         """
-        if not config.LOGGER_ID:
-            logger.info("Log group is not configured yet; skipping assistant startup.")
-            return
         if config.SESSION1:
             await self.boot_client(1, self.one)
         if config.SESSION2:

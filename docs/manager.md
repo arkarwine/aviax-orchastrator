@@ -17,10 +17,13 @@ MANAGER_DEFAULT_MONGO_URL=
 Optional:
 
 ```env
+MANAGER_SUDOERS=123456789,987654321
 MANAGER_API_KEY=
 DEPLOYMENTS_DIR=deployments
 TEMPLATE_PATH=.
 ```
+
+`MANAGER_SUDOERS` accepts multiple Telegram user IDs separated by commas or spaces. The owner is always authorized automatically. Recovery and failure notifications continue going only to `MANAGER_OWNER_ID`.
 
 ## Run
 
@@ -76,9 +79,11 @@ Heartbeat monitoring activates for them after their next manual or normal deploy
 After `/newbot`, setup happens inside the deployed bot:
 
 1. Send `/start` to the deployed bot in private chat to claim owner.
-2. Create a log group, add the deployed bot, promote it as admin, then run `/setlog` in that group.
-3. Use the Next button from the `/setlog` success message to start assistant session extraction in DM.
+2. Connect an assistant session with `/addsession` in private chat.
+3. Optionally create a log group, add the deployed bot, promote it as admin, then run `/setlog` in that group.
 4. Optionally set support group, updates channel, language, and more assistant sessions.
+
+The log group is optional. Missing access, removal from the group, or lost admin rights disables log delivery without preventing the bot or assistants from starting.
 
 You can skip first-user owner claiming by passing `owner_id` to `/newbot`.
 The deployed bot owner can also transfer ownership later with:
@@ -102,6 +107,10 @@ Assistant sessions can be removed by slot:
 ```
 
 Owners and sudo users can view configured session slots with `/sessions` and remove them with `/removesession`. Session strings are never displayed. Restart the deployed bot after removing a session to disconnect it and rebuild the assistant clients.
+
+On Linux, deployments are launched outside the manager's process tree. Restarting a PM2-managed manager process therefore leaves already-running deployments untouched. Deployments started by older manager versions move to this detached launch model the next time they are started.
+
+Using `/stop <name>` records a persistent intentional-stop state. Health monitoring and automatic recovery will not start that deployment again until `/deploy <name>` or `/restart <name>` is issued manually.
 
 ## Isolation Rules
 

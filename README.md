@@ -229,7 +229,7 @@ Thanks to all the contributors, supporters, and users of the Aviax Music Bot. Yo
 
 A lightweight manager bot has been added to automate new music bot deployments from this template.
 
-Use `/newbot <name> <bot_token> [owner_id] [database_name]` to create a deployment. The database name is generated automatically when omitted. The deployed bot then guides owner claim, log group setup, assistant session extraction, and optional support/update/language settings from Telegram.
+Use `/newbot <name> <bot_token> [owner_id] [database_name]` to create a deployment. The database name is generated automatically when omitted. The deployed bot then guides owner claim, assistant session extraction, and optional log/support/update/language settings from Telegram.
 
 See [Deployment Manager](docs/manager.md) for the manager env, PM2 command, commands, setup flow, and runtime isolation rules.
 
