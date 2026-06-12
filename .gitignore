@@ -7,6 +7,7 @@ __pycache__/
 manager.env
 manager_deployments.json
 manager_sudoers.json
+manager_backup_state.json
 
 *.session
 *.session-journal

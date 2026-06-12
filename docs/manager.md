@@ -27,11 +27,17 @@ TEMPLATE_PATH=.
 
 The manager owner can update access at runtime with `/addsudo <user_id>` and `/delsudo <user_id>`. `/sudolist` shows current access. Telegram-added sudoers are persisted in `manager_sudoers.json` and take effect immediately without restarting the manager.
 
+The manager sends a recovery configuration backup to `MANAGER_OWNER_ID` every 24 hours. Use `/backup` for an immediate backup. The archive contains manager/deployment environment files and manager state, including credentials, but excludes MongoDB data, logs, downloads, caches, and session files. Store it securely. Configure the interval with `MANAGER_BACKUP_INTERVAL`.
+
 ## Run
 
 ```bash
-pm2 start "python3 manager.py" --name world
+pm2 delete world
+pm2 start ecosystem.config.cjs
+pm2 save
 ```
+
+The ecosystem file sets `treekill: false`. This is required because PM2 otherwise kills deployment processes when it restarts the manager. Restart the manager with `pm2 restart ecosystem.config.cjs` so the setting remains explicit.
 
 ## Commands
 

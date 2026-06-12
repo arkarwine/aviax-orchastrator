@@ -14,6 +14,7 @@ import threading
 import time
 import traceback
 import uuid
+import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,7 @@ ROOT = Path(__file__).resolve().parent
 MANAGER_ENV = ROOT / "manager.env"
 STORE_PATH = ROOT / "manager_deployments.json"
 SUDO_STORE_PATH = ROOT / "manager_sudoers.json"
+BACKUP_STATE_PATH = ROOT / "manager_backup_state.json"
 DEPLOYMENT_ENV_KEYS = {
     "API_ID",
     "API_HASH",
@@ -337,11 +339,13 @@ class BotManager:
         self.health_confirmations = max(2, int(os.getenv("MANAGER_HEALTH_CONFIRMATIONS", "2")))
         self.recovery_limit = max(1, int(os.getenv("MANAGER_RECOVERY_LIMIT", "3")))
         self.recovery_window = max(60, int(os.getenv("MANAGER_RECOVERY_WINDOW", "3600")))
+        self.backup_interval = max(3600, int(os.getenv("MANAGER_BACKUP_INTERVAL", "86400")))
         self.processes: Dict[str, subprocess.Popen] = {}
         self.failed_restarts: set[str] = set()
         self.stale_health_counts: Dict[str, int] = {}
         self.recovering: set[str] = set()
         self.recovery_guard = threading.Lock()
+        self.backup_lock = threading.Lock()
         self.app = Client(
             name="deploy-manager",
             api_id=self.config.api_id,
@@ -372,6 +376,7 @@ class BotManager:
         self.app.on_message(filters.private & filters.command("sudolist") & self.authorized_filter)(self.sudolist)
         self.app.on_message(filters.private & filters.command("addsudo") & owner)(self.addsudo)
         self.app.on_message(filters.private & filters.command(["delsudo", "rmsudo"]) & owner)(self.delsudo)
+        self.app.on_message(filters.private & filters.command("backup") & owner)(self.backup)
 
     @handler_errors
     async def start(self, client: Client, message: Message) -> None:
@@ -397,7 +402,8 @@ class BotManager:
             "📄 /logs &lt;name&gt; - Retrieve a deployment's full log.\n"
             "👥 /sudolist - View manager owner and sudo users.\n"
             "➕ /addsudo &lt;user_id&gt; - Grant manager access. Owner only.\n"
-            "➖ /delsudo &lt;user_id&gt; - Remove manager access. Owner only.\n",
+            "➖ /delsudo &lt;user_id&gt; - Remove manager access. Owner only.\n"
+            "💾 /backup - Send a recovery configuration backup. Owner only.\n",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
 
@@ -487,6 +493,119 @@ class BotManager:
             self.authorized_filter.add(user_id)
             raise
         await message.reply_text(f"✅ Removed <code>{user_id}</code> from manager sudo users.")
+
+    def backup_sources(self) -> list[tuple[Path, str]]:
+        sources = []
+        for path, archive_name in (
+            (MANAGER_ENV, "manager.env"),
+            (STORE_PATH, "manager_deployments.json"),
+            (SUDO_STORE_PATH, "manager_sudoers.json"),
+        ):
+            if path.is_file():
+                sources.append((path, archive_name))
+        for deployment in self.store.list().values():
+            env_path = deployment.deployment_path / ".env"
+            if env_path.is_file():
+                sources.append((env_path, f"deployments/{deployment.name}/.env"))
+        return sources
+
+    def create_backup_archive(self) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        archive_path = Path(tempfile.gettempdir()) / f"aviax-manager-backup-{timestamp}.zip"
+        deployments = self.store.list()
+        manifest = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "deployment_count": len(deployments),
+            "deployments": sorted(deployments),
+            "contains_secrets": True,
+            "contents": [
+                "manager.env",
+                "manager_deployments.json",
+                "manager_sudoers.json",
+                "deployment .env files",
+            ],
+            "excluded": ["logs", "downloads", "cache", "session files", "MongoDB data"],
+        }
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("BACKUP_MANIFEST.json", json.dumps(manifest, indent=2))
+            for source, archive_name in self.backup_sources():
+                archive.write(source, archive_name)
+        return archive_path
+
+    def read_backup_state(self) -> dict:
+        try:
+            return json.loads(BACKUP_STATE_PATH.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            return {}
+
+    def save_backup_state(self, *, success: bool, error: str = "") -> None:
+        state = self.read_backup_state()
+        state["last_attempt"] = datetime.now(timezone.utc).isoformat()
+        if success:
+            state["last_success"] = state["last_attempt"]
+            state.pop("last_error", None)
+        elif error:
+            state["last_error"] = error[:500]
+        temporary = BACKUP_STATE_PATH.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        temporary.replace(BACKUP_STATE_PATH)
+
+    async def send_backup(self, *, scheduled: bool) -> tuple[bool, str]:
+        if not self.backup_lock.acquire(blocking=False):
+            return False, "A backup is already in progress."
+        archive_path = None
+        try:
+            archive_path = self.create_backup_archive()
+            caption = (
+                "💾 <b>Daily manager recovery backup</b>\n\n"
+                if scheduled
+                else "💾 <b>Manager recovery backup</b>\n\n"
+            )
+            caption += (
+                f"Deployments: <code>{len(self.store.list())}</code>\n"
+                "⚠️ Contains credentials and deployment secrets. Store it securely.\n"
+                "ℹ️ MongoDB data, downloads, logs, caches, and session files are not included."
+            )
+            for attempt in range(1, 4):
+                try:
+                    await self.app.send_document(
+                        self.config.owner_id,
+                        str(archive_path),
+                        caption=caption,
+                    )
+                    break
+                except Exception:
+                    if attempt >= 3:
+                        raise
+                    await asyncio.sleep(attempt * 3)
+            self.save_backup_state(success=True)
+            logger.info("Manager recovery backup sent to owner.")
+            return True, ""
+        except Exception as exc:
+            logger.exception("Could not create or send manager recovery backup")
+            try:
+                self.save_backup_state(success=False, error=f"{type(exc).__name__}: {exc}")
+            except OSError:
+                logger.exception("Could not persist backup failure state")
+            return False, f"{type(exc).__name__}: {exc}"
+        finally:
+            if archive_path:
+                archive_path.unlink(missing_ok=True)
+            self.backup_lock.release()
+
+    @handler_errors
+    async def backup(self, client: Client, message: Message) -> None:
+        status = await message.reply_text(
+            "💾 Preparing recovery backup...",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+        success, error = await self.send_backup(scheduled=False)
+        if success:
+            return await status.edit_text("✅ Recovery backup sent to the manager owner.")
+        await status.edit_text(
+            "❌ I could not send the recovery backup.\n\n"
+            f"Reason: <code>{html.escape(error)}</code>"
+        )
 
     @handler_errors
     async def list_bots(self, client: Client, message: Message) -> None:
@@ -1553,6 +1672,25 @@ class BotManager:
                 except Exception:
                     logger.exception("Deployment health check failed unexpectedly for %s", deployment.name)
 
+    async def _send_scheduled_backup(self) -> None:
+        success, error = await self.send_backup(scheduled=True)
+        if not success and error != "A backup is already in progress.":
+            await self._send_owner_with_retry(
+                "❌ The daily manager recovery backup could not be delivered.\n\n"
+                f"Reason: <code>{html.escape(error)}</code>\n\n"
+                "💡 Run <code>/backup</code> to retry manually."
+            )
+
+    def _backup_loop(self) -> None:
+        logger.info("Daily backup scheduler started with interval %s seconds.", self.backup_interval)
+        while not self.shutdown_event.wait(60):
+            state = self.read_backup_state()
+            reference = state.get("last_success") or state.get("last_attempt")
+            last_run = self.parse_timestamp(reference) or 0
+            if time.time() - last_run < self.backup_interval:
+                continue
+            self._run_on_app_loop(self._send_scheduled_backup)
+
     def start_process(
         self,
         deployment: DeploymentMeta,
@@ -1761,15 +1899,23 @@ class BotManager:
 
     def run(self) -> None:
         logger.info("Starting manager bot.")
+        if os.getenv("PM2_HOME") and os.getenv("MANAGER_PM2_TREEKILL_DISABLED") != "1":
+            logger.warning(
+                "Manager is running under PM2 without the protected ecosystem configuration. "
+                "PM2 may kill deployed bots when restarting the manager. "
+                "Start it with ecosystem.config.cjs."
+            )
         signal.signal(signal.SIGINT, self._shutdown_handler)
         signal.signal(signal.SIGTERM, self._shutdown_handler)
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.backup_thread = threading.Thread(target=self._backup_loop, daemon=True)
         try:
             # Start the bot client so the event loop is available for notifications
             self.app.start()
 
             # start monitor thread after app started
             self.monitor_thread.start()
+            self.backup_thread.start()
 
             # Block until stop signal; idle keeps the client running.
             idle()
@@ -1778,6 +1924,8 @@ class BotManager:
             self.shutdown_event.set()
             if self.monitor_thread.is_alive():
                 self.monitor_thread.join(timeout=2)
+            if self.backup_thread.is_alive():
+                self.backup_thread.join(timeout=2)
             try:
                 self.app.stop()
             except Exception:
