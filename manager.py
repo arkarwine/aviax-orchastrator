@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 from pyrogram import Client, filters, idle
 from pyrogram.errors import RPCError
 from pyrogram.types import Message, ReplyParameters
+from pymongo import AsyncMongoClient
 import psutil
 
 ROOT = Path(__file__).resolve().parent
@@ -31,6 +32,11 @@ MANAGER_ENV = ROOT / "manager.env"
 STORE_PATH = ROOT / "manager_deployments.json"
 SUDO_STORE_PATH = ROOT / "manager_sudoers.json"
 BACKUP_STATE_PATH = ROOT / "manager_backup_state.json"
+DEPLOYED_REFRESH_NOTICE = (
+    "⚡ <b>Activation required:</b> Have the deployed bot owner or an existing sudo user "
+    "run <code>/refreshconfig</code> in that deployed bot's private chat. "
+    "The stored change will not affect the running bot until then."
+)
 DEPLOYMENT_ENV_KEYS = {
     "API_ID",
     "API_HASH",
@@ -175,6 +181,9 @@ class DeploymentMeta:
     intentionally_stopped: bool = False
     restart_history: list[str] = field(default_factory=list)
     last_failure: Optional[str] = None
+    pending_restart: bool = False
+    restart_requested_at: Optional[str] = None
+    restart_requested_by: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -344,6 +353,7 @@ class BotManager:
         self.failed_restarts: set[str] = set()
         self.stale_health_counts: Dict[str, int] = {}
         self.recovering: set[str] = set()
+        self.restarting: set[str] = set()
         self.recovery_guard = threading.Lock()
         self.backup_lock = threading.Lock()
         self.app = Client(
@@ -377,6 +387,9 @@ class BotManager:
         self.app.on_message(filters.private & filters.command("addsudo") & owner)(self.addsudo)
         self.app.on_message(filters.private & filters.command(["delsudo", "rmsudo"]) & owner)(self.delsudo)
         self.app.on_message(filters.private & filters.command("backup") & owner)(self.backup)
+        self.app.on_message(filters.private & filters.command("addbotsudo") & self.authorized_filter)(self.add_bot_sudo)
+        self.app.on_message(filters.private & filters.command(["delbotsudo", "rmbotsudo"]) & self.authorized_filter)(self.del_bot_sudo)
+        self.app.on_message(filters.private & filters.command("botsudolist") & self.authorized_filter)(self.bot_sudo_list)
 
     @handler_errors
     async def start(self, client: Client, message: Message) -> None:
@@ -398,12 +411,15 @@ class BotManager:
             "▶️ /deploy &lt;name&gt; - Start a stopped deployment.\n"
             "⏹️ /stop &lt;name&gt; - Stop a running deployment.\n"
             "🗑️ /delete &lt;name&gt; - Permanently delete a deployment.\n"
-            "🔄 /restart &lt;name&gt; - Restart a deployed bot.\n"
+            "🔄 /restart &lt;name|all&gt; - Restart one or all running deployments when their active streams finish.\n"
             "📄 /logs &lt;name&gt; - Retrieve a deployment's full log.\n"
             "👥 /sudolist - View manager owner and sudo users.\n"
             "➕ /addsudo &lt;user_id&gt; - Grant manager access. Owner only.\n"
             "➖ /delsudo &lt;user_id&gt; - Remove manager access. Owner only.\n"
-            "💾 /backup - Send a recovery configuration backup. Owner only.\n",
+            "💾 /backup - Send a recovery configuration backup. Owner only.\n"
+            "🛡️ /addbotsudo &lt;deployment&gt; &lt;user_id&gt; - Add a deployed-bot sudo user; requires /refreshconfig.\n"
+            "🚫 /delbotsudo &lt;deployment&gt; &lt;user_id&gt; - Remove a deployed-bot sudo user; requires /refreshconfig.\n"
+            "👥 /botsudolist &lt;deployment&gt; - View a deployed bot's sudo users.\n",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
 
@@ -493,6 +509,190 @@ class BotManager:
             self.authorized_filter.add(user_id)
             raise
         await message.reply_text(f"✅ Removed <code>{user_id}</code> from manager sudo users.")
+
+    def deployment_database(self, deployment: DeploymentMeta):
+        env = self.load_deployment_env(deployment.deployment_path / ".env")
+        mongo_url = env.get("MONGO_URL")
+        db_name = deployment.db_name or env.get("DB_NAME")
+        if not mongo_url or not db_name:
+            raise ValueError("The deployment database configuration is incomplete.")
+        mongo = AsyncMongoClient(mongo_url, serverSelectionTimeoutMS=12500)
+        return mongo, mongo[db_name], env
+
+    def parse_bot_sudo_args(
+        self,
+        message: Message,
+        command: str,
+    ) -> tuple[Optional[DeploymentMeta], Optional[int], Optional[str]]:
+        args = message.text.split(maxsplit=2)
+        if len(args) < 3 or not args[2].strip().isdigit() or int(args[2]) <= 0:
+            return None, None, (
+                f"Usage: <code>/{command} &lt;deployment&gt; &lt;telegram_user_id&gt;</code>"
+            )
+        name = normalize_name(args[1])
+        deployment = self.store.get(name)
+        if not deployment:
+            return None, None, (
+                f"Deployment <b>{name}</b> was not found. Use <code>/list</code> to check names."
+            )
+        return deployment, int(args[2]), None
+
+    @handler_errors
+    async def add_bot_sudo(self, client: Client, message: Message) -> None:
+        deployment, user_id, error = self.parse_bot_sudo_args(message, "addbotsudo")
+        if error:
+            return await message.reply_text(
+                f"❌ {error}",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        try:
+            user = await client.get_users(user_id)
+            if user.is_bot:
+                return await message.reply_text("❌ Bot accounts cannot be sudo users.")
+        except Exception:
+            user = None
+
+        status = await message.reply_text(
+            f"🛡️ Adding <code>{user_id}</code> to <b>{deployment.name}</b>...",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+        mongo = None
+        try:
+            mongo, database, _ = self.deployment_database(deployment)
+            await mongo.admin.command("ping")
+            result = await database.cache.update_one(
+                {"_id": "sudoers"},
+                {"$addToSet": {"user_ids": user_id}},
+                upsert=True,
+            )
+        except Exception:
+            logger.exception("Could not add deployed-bot sudo user for %s", deployment.name)
+            return await status.edit_text(
+                "❌ I could not update that deployed bot's sudo list.\n\n"
+                "💡 Check its database configuration and connection, then try again."
+            )
+        finally:
+            if mongo is not None:
+                await mongo.close()
+
+        label = (
+            f"<b>{html.escape(user.first_name or str(user_id))}</b> (<code>{user_id}</code>)"
+            if user
+            else f"<code>{user_id}</code>"
+        )
+        state = "already had sudo access" if not result.modified_count else "was added"
+        await status.edit_text(
+            f"✅ {label} {state} on <b>{deployment.name}</b>.\n\n"
+            f"{DEPLOYED_REFRESH_NOTICE}"
+        )
+
+    @handler_errors
+    async def del_bot_sudo(self, client: Client, message: Message) -> None:
+        deployment, user_id, error = self.parse_bot_sudo_args(message, "delbotsudo")
+        if error:
+            return await message.reply_text(
+                f"❌ {error}",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        status = await message.reply_text(
+            f"🚫 Removing <code>{user_id}</code> from <b>{deployment.name}</b>...",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+        mongo = None
+        try:
+            mongo, database, env = self.deployment_database(deployment)
+            await mongo.admin.command("ping")
+            runtime = await database.cache.find_one({"_id": "runtime_config"}) or {}
+            owner_id = int(
+                runtime.get("settings", {}).get("OWNER_ID")
+                or env.get("OWNER_ID")
+                or 0
+            )
+            if user_id == owner_id:
+                return await status.edit_text(
+                    "👑 The deployed bot owner cannot be removed from sudo access.\n\n"
+                    "💡 Use that deployed bot's <code>/changeowner</code> command first."
+                )
+            result = await database.cache.update_one(
+                {"_id": "sudoers"},
+                {"$pull": {"user_ids": user_id}},
+            )
+        except Exception:
+            logger.exception("Could not remove deployed-bot sudo user for %s", deployment.name)
+            return await status.edit_text(
+                "❌ I could not update that deployed bot's sudo list.\n\n"
+                "💡 Check its database configuration and connection, then try again."
+            )
+        finally:
+            if mongo is not None:
+                await mongo.close()
+
+        state = "was removed" if result.modified_count else "was not in the sudo list"
+        await status.edit_text(
+            f"✅ <code>{user_id}</code> {state} on <b>{deployment.name}</b>.\n\n"
+            f"{DEPLOYED_REFRESH_NOTICE}"
+        )
+
+    @handler_errors
+    async def bot_sudo_list(self, client: Client, message: Message) -> None:
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            return await message.reply_text(
+                "👥 Usage: <code>/botsudolist &lt;deployment&gt;</code>",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        name = normalize_name(args[1])
+        deployment = self.store.get(name)
+        if not deployment:
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> was not found.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        status = await message.reply_text(
+            f"👥 Loading sudo users for <b>{name}</b>...",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+        mongo = None
+        try:
+            mongo, database, env = self.deployment_database(deployment)
+            await mongo.admin.command("ping")
+            sudo_doc = await database.cache.find_one({"_id": "sudoers"}) or {}
+            runtime = await database.cache.find_one({"_id": "runtime_config"}) or {}
+            owner_id = int(
+                runtime.get("settings", {}).get("OWNER_ID")
+                or env.get("OWNER_ID")
+                or 0
+            )
+            sudoers = sorted(
+                {
+                    int(value)
+                    for value in sudo_doc.get("user_ids", [])
+                    if str(value).isdigit() and int(value) > 0
+                }
+            )
+        except Exception:
+            logger.exception("Could not read deployed-bot sudo users for %s", deployment.name)
+            return await status.edit_text(
+                "❌ I could not read that deployed bot's sudo list.\n\n"
+                "💡 Check its database configuration and connection, then try again."
+            )
+        finally:
+            if mongo is not None:
+                await mongo.close()
+
+        lines = [f"<b>👥 Sudo users for {html.escape(name)}</b>"]
+        if owner_id:
+            lines.append(f"\n👑 Owner: <code>{owner_id}</code>")
+        additional = [user_id for user_id in sudoers if user_id != owner_id]
+        if additional:
+            lines.append("\n<b>🛡️ Additional sudo users</b>")
+            lines.extend(f"• <code>{user_id}</code>" for user_id in additional)
+        else:
+            lines.append("\n📭 No additional sudo users.")
+        await status.edit_text("\n".join(lines))
 
     def backup_sources(self) -> list[tuple[Path, str]]:
         sources = []
@@ -616,8 +816,9 @@ class BotManager:
         for name, deployment in self.store.list().items():
             state, _, _ = self.deployment_health(deployment)
             status = self.format_health_state(state)
+            pending = " — <code>🔄 restart queued</code>" if deployment.pending_restart else ""
             lines.append(
-                f"<b>{deployment.username}</b> ({name}) — <code>{status}</code>"
+                f"<b>{deployment.username}</b> ({name}) — <code>{status}</code>{pending}"
             )
         await message.reply_text("\n".join(lines), reply_parameters=ReplyParameters(message_id=message.id))
 
@@ -660,6 +861,11 @@ class BotManager:
             text += f"\nReason: <code>{html.escape(reason)}</code>"
         if deployment.last_failure:
             text += f"\nLast failure: <code>{html.escape(deployment.last_failure)}</code>"
+        if deployment.pending_restart:
+            text += (
+                "\nRestart: <code>queued until active streams finish</code>"
+                f"\nRequested: <code>{deployment.restart_requested_at or 'unknown'}</code>"
+            )
         await message.reply_text(text, reply_parameters=ReplyParameters(message_id=message.id))
 
     @handler_errors
@@ -713,12 +919,14 @@ class BotManager:
         if not deployment.is_running:
             deployment.desired_running = False
             deployment.intentionally_stopped = True
+            self.clear_pending_restart(deployment)
             self.stale_health_counts.pop(name, None)
             self.store.update(deployment)
             return await message.reply_text(f"⚫ Deployment <b>{name}</b> is already stopped.", reply_parameters=ReplyParameters(message_id=message.id))
 
         deployment.desired_running = False
         deployment.intentionally_stopped = True
+        self.clear_pending_restart(deployment)
         self.stale_health_counts.pop(name, None)
         self.store.update(deployment)
         stopped, error = self.stop_process(deployment)
@@ -810,7 +1018,6 @@ class BotManager:
                 "💡 Correct the deployment record before trying again.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
-
         status = await message.reply_text(
             f"🗑️ Preparing to delete deployment <b>{name}</b>...",
             reply_parameters=ReplyParameters(message_id=message.id),
@@ -844,10 +1051,13 @@ class BotManager:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
             return await message.reply_text(
-                "🔄 Usage: <code>/restart &lt;name&gt;</code>\n\n"
+                "🔄 Usage: <code>/restart &lt;name|all&gt;</code>\n\n"
                 "💡 Use <code>/list</code> to check registered deployment names.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
+
+        if args[1].strip().lower() == "all":
+            return await self.restart_all(message)
 
         name = normalize_name(args[1])
         deployment = self.store.get(name)
@@ -857,25 +1067,139 @@ class BotManager:
                 "💡 Use <code>/list</code> to check registered deployment names.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
-        if name in self.recovering:
+
+        status = await message.reply_text(
+            f"🔎 Checking active streams for deployment <b>{name}</b>...",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+        result, detail = await self.request_restart(deployment, message.from_user.id, status)
+        if result == "waiting":
+            return await status.edit_text(
+                f"⏳ Restart for deployment <b>{name}</b> is waiting.\n\n"
+                f"🎵 {detail}\n"
+                "🔄 It will restart automatically as soon as the deployment reports no active streams.\n\n"
+                f"💡 Use <code>/stop {name}</code> to cancel the queued restart and stop the deployment."
+            )
+        await status.edit_text(detail)
+
+    async def restart_all(self, message: Message) -> None:
+        deployments = list(self.store.list().values())
+        if not deployments:
             return await message.reply_text(
-                f"🔄 Deployment <b>{name}</b> is already being recovered automatically.\n\n"
-                "💡 Wait for the recovery report before restarting it manually.",
+                "📭 No deployments were found.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
         status = await message.reply_text(
-            f"🔄 Restarting deployment <b>{name}</b>...",
+            "🔎 Checking all deployments for active streams...",
             reply_parameters=ReplyParameters(message_id=message.id),
+        )
+        lines = ["<b>🔄 Restart All</b>"]
+        counts = {"restarted": 0, "waiting": 0, "skipped": 0, "failed": 0}
+        for deployment in deployments:
+            if deployment.intentionally_stopped or not deployment.desired_running:
+                counts["skipped"] += 1
+                lines.append(f"⚫ <b>{deployment.name}</b> — skipped; intentionally stopped")
+                continue
+
+            await status.edit_text(
+                f"🔎 Checking deployment <b>{deployment.name}</b>...\n\n"
+                f"Processed: <code>{sum(counts.values())}/{len(deployments)}</code>"
+            )
+            result, detail = await self.request_restart(
+                deployment,
+                message.from_user.id,
+                status,
+                bulk=True,
+            )
+            if result in counts:
+                counts[result] += 1
+            else:
+                counts["skipped"] += 1
+            icon = {
+                "restarted": "✅",
+                "waiting": "⏳",
+                "failed": "❌",
+                "skipped": "⚫",
+            }.get(result, "⚠️")
+            lines.append(f"{icon} <b>{deployment.name}</b> — {detail}")
+
+        lines.extend(
+            [
+                "",
+                f"✅ Restarted immediately: <code>{counts['restarted']}</code>",
+                f"⏳ Waiting for streams: <code>{counts['waiting']}</code>",
+                f"⚫ Skipped: <code>{counts['skipped']}</code>",
+                f"❌ Failed: <code>{counts['failed']}</code>",
+                "",
+                "🔔 You will be notified when each waiting restart begins and completes.",
+            ]
+        )
+        await status.edit_text("\n".join(lines))
+
+    async def request_restart(
+        self,
+        deployment: DeploymentMeta,
+        requested_by: int,
+        status: Message,
+        *,
+        bulk: bool = False,
+    ) -> tuple[str, str]:
+        name = deployment.name
+        if name in self.recovering:
+            return (
+                "skipped",
+                "automatic recovery is already in progress",
+            )
+        if name in self.restarting:
+            return (
+                "skipped",
+                "restart is already underway",
+            )
+
+        if deployment.is_running:
+            deployment.pending_restart = True
+            deployment.restart_requested_at = datetime.now(timezone.utc).isoformat()
+            deployment.restart_requested_by = requested_by
+            try:
+                self.write_restart_marker(deployment)
+            except OSError:
+                self.clear_pending_restart(deployment)
+                self.store.update(deployment)
+                logger.exception("Could not create restart marker for deployment %s", name)
+                return (
+                    "failed",
+                    "could not safely prepare the deployment for restart; check directory permissions",
+                )
+            self.store.update(deployment)
+            stream_count = self.active_stream_count(deployment)
+            if stream_count is None or stream_count > 0:
+                if stream_count is None:
+                    detail = "waiting for a fresh heartbeat to confirm that no streams are active"
+                else:
+                    detail = (
+                        f"waiting for <code>{stream_count}</code> active stream"
+                        f"{'s' if stream_count != 1 else ''} to finish"
+                    )
+                return (
+                    "waiting",
+                    detail,
+                )
+
+        await status.edit_text(
+            f"⚡ Deployment <b>{name}</b> has no active streams.\n\n"
+            "🔄 Restarting immediately..."
         )
         if deployment.is_running:
             await status.edit_text(f"⏹️ Stopping deployment <b>{name}</b>...")
             stopped, error = self.stop_process(deployment)
             if not stopped:
+                self.clear_pending_restart(deployment)
+                self.store.update(deployment)
                 logger.error("Failed to stop deployment %s for restart: %s", name, error)
-                return await status.edit_text(
-                    f"❌ Deployment <b>{name}</b> could not be stopped, so it was not restarted.\n\n"
-                    f"💡 Run <code>/stop {name}</code>, review the manager logs, then try again."
+                return (
+                    "failed",
+                    "could not be stopped, so it was not restarted",
                 )
             self.store.update(deployment)
         elif deployment.pid:
@@ -886,18 +1210,24 @@ class BotManager:
         await status.edit_text(f"🚀 Starting deployment <b>{name}</b>...")
         started, error = self.start_process(deployment)
         if not started:
+            self.clear_pending_restart(deployment)
             self.store.update(deployment)
             logger.error("Failed to restart deployment %s: %s", name, error)
-            return await status.edit_text(
-                f"❌ Deployment <b>{name}</b> stopped but could not start again.\n\n"
-                f"💡 Check its <code>run.log</code>, then run <code>/deploy {name}</code>."
+            return (
+                "failed",
+                "stopped but could not start again; review its logs",
             )
 
         deployment.started_at = datetime.now(timezone.utc).isoformat()
+        self.clear_pending_restart(deployment)
         self.store.update(deployment)
-        await status.edit_text(
-            f"✅ Deployment <b>{name}</b> restarted successfully.\n"
-            f"PID: <code>{deployment.pid}</code>"
+        return (
+            "restarted",
+            (
+                f"restarted immediately; PID <code>{deployment.pid}</code>"
+                if bulk
+                else f"✅ Deployment <b>{name}</b> restarted immediately.\nPID: <code>{deployment.pid}</code>"
+            ),
         )
 
     @handler_errors
@@ -1337,19 +1667,34 @@ class BotManager:
         except Exception as exc:
             logger.warning("Failed to schedule app call %s: %s", func.__name__, exc)
 
-    async def _send_owner_with_retry(self, text: str) -> None:
+    async def _send_user_with_retry(self, user_id: int, text: str) -> None:
         for attempt in range(1, 4):
             try:
-                await self.app.send_message(self.config.owner_id, text)
+                await self.app.send_message(user_id, text)
                 return
             except Exception as exc:
-                logger.warning("Owner notification attempt %s failed: %s", attempt, exc)
+                logger.warning(
+                    "Notification to user %s attempt %s failed: %s",
+                    user_id,
+                    attempt,
+                    exc,
+                )
                 if attempt < 3:
                     await asyncio.sleep(attempt * 2)
-        logger.error("Owner notification could not be delivered after 3 attempts.")
+        logger.error("Notification to user %s could not be delivered after 3 attempts.", user_id)
+
+    async def _send_owner_with_retry(self, text: str) -> None:
+        await self._send_user_with_retry(self.config.owner_id, text)
 
     def _notify_owner(self, text: str) -> None:
         self._run_on_app_loop(self._send_owner_with_retry, text)
+
+    def _notify_user(self, user_id: Optional[int], text: str) -> None:
+        self._run_on_app_loop(
+            self._send_user_with_retry,
+            user_id or self.config.owner_id,
+            text,
+        )
 
     def process_matches(self, deployment: DeploymentMeta) -> bool:
         if not deployment.pid:
@@ -1377,9 +1722,109 @@ class BotManager:
         except (OSError, ValueError, TypeError):
             return None
 
+    def active_stream_count(self, deployment: DeploymentMeta) -> Optional[int]:
+        health = self.read_health(deployment)
+        if not health:
+            return None
+        try:
+            if time.time() - float(health.get("timestamp", 0)) > self.health_stale_after:
+                return None
+            return max(0, int(health.get("active_voice_chats", 0)))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def restart_marker_path(deployment: DeploymentMeta) -> Path:
+        return deployment.deployment_path / ".restart-when-idle"
+
+    def write_restart_marker(self, deployment: DeploymentMeta) -> None:
+        self.restart_marker_path(deployment).write_text(
+            deployment.restart_requested_at or datetime.now(timezone.utc).isoformat(),
+            encoding="ascii",
+        )
+
+    def clear_pending_restart(self, deployment: DeploymentMeta) -> None:
+        deployment.pending_restart = False
+        deployment.restart_requested_at = None
+        deployment.restart_requested_by = None
+        try:
+            self.restart_marker_path(deployment).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove restart marker for deployment %s.", deployment.name)
+
+    def run_pending_restart(self, deployment: DeploymentMeta) -> None:
+        with self.recovery_guard:
+            if (
+                deployment.name in self.restarting
+                or deployment.name in self.recovering
+                or not deployment.pending_restart
+            ):
+                return
+            self.restarting.add(deployment.name)
+
+        requested_by = deployment.restart_requested_by
+        try:
+            if (
+                not deployment.desired_running
+                or deployment.intentionally_stopped
+                or not self.process_matches(deployment)
+            ):
+                self.clear_pending_restart(deployment)
+                self.store.update(deployment)
+                return
+
+            streams = self.active_stream_count(deployment)
+            if streams is None or streams > 0:
+                return
+
+            logger.info("Running queued idle restart for deployment %s.", deployment.name)
+            self._notify_user(
+                requested_by,
+                f"🔄 Queued restart for deployment <b>{deployment.name}</b> is now underway.\n\n"
+                "✅ All active streams have finished. The deployment is restarting now.",
+            )
+            stopped, error = self.stop_process(deployment)
+            if not stopped:
+                self.clear_pending_restart(deployment)
+                deployment.last_failure = f"Queued restart could not stop deployment: {error}"
+                self.store.update(deployment)
+                self._notify_user(
+                    requested_by,
+                    f"❌ Queued restart for deployment <b>{deployment.name}</b> failed because "
+                    "the process could not be stopped.\n\n"
+                    f"💡 Review <code>/logs {deployment.name}</code>, then request the restart again.",
+                )
+                return
+
+            started, error = self.start_process(deployment, mark_desired=False)
+            self.clear_pending_restart(deployment)
+            if not started:
+                deployment.last_failure = f"Queued restart could not start deployment: {error}"
+                self.store.update(deployment)
+                self._notify_user(
+                    requested_by,
+                    f"❌ Deployment <b>{deployment.name}</b> stopped after its streams finished "
+                    "but could not start again.\n\n"
+                    f"💡 Review <code>/logs {deployment.name}</code>, then use <code>/deploy {deployment.name}</code>.",
+                )
+                return
+
+            deployment.last_failure = None
+            self.store.update(deployment)
+            self._notify_user(
+                requested_by,
+                f"✅ Deployment <b>{deployment.name}</b> restarted after all active streams finished.\n"
+                f"PID: <code>{deployment.pid}</code>",
+            )
+        finally:
+            with self.recovery_guard:
+                self.restarting.discard(deployment.name)
+
     def deployment_health(self, deployment: DeploymentMeta) -> tuple[str, Optional[dict], str]:
         if deployment.name in self.recovering:
             return "recovering", self.read_health(deployment), "automatic recovery in progress"
+        if deployment.name in self.restarting:
+            return "recovering", self.read_health(deployment), "queued restart in progress"
         if not deployment.desired_running:
             return "stopped", self.read_health(deployment), "stopped intentionally"
         if not self.process_matches(deployment):
@@ -1495,6 +1940,7 @@ class BotManager:
         return recent
 
     def recover_deployment(self, deployment: DeploymentMeta, reason: str) -> None:
+        queued_restart_requester = deployment.restart_requested_by
         with self.recovery_guard:
             if (
                 deployment.name in self.recovering
@@ -1543,6 +1989,8 @@ class BotManager:
 
             deployment.restart_history = recent + [datetime.now(timezone.utc).isoformat()]
             deployment.last_failure = reason
+            if deployment.pending_restart:
+                self.clear_pending_restart(deployment)
             started, error = self.start_process(deployment, mark_desired=False)
             self.store.update(deployment)
             if not started:
@@ -1587,6 +2035,12 @@ class BotManager:
                     report
                     + f"\n\n✅ Deployment <b>{deployment.name}</b> was restarted automatically because it stopped responding."
                 )
+                if queued_restart_requester and queued_restart_requester != self.config.owner_id:
+                    self._notify_user(
+                        queued_restart_requester,
+                        f"✅ Queued restart for deployment <b>{deployment.name}</b> was completed "
+                        "as part of automatic recovery.",
+                    )
             else:
                 self._notify_owner(
                     report
@@ -1644,6 +2098,37 @@ class BotManager:
         while not self.shutdown_event.wait(self.monitor_interval):
             for deployment in list(self.store.list().values()):
                 try:
+                    if (
+                        deployment.pending_restart
+                        and deployment.name not in self.restarting
+                        and deployment.name not in self.recovering
+                        and self.process_matches(deployment)
+                        and self.active_stream_count(deployment) == 0
+                    ):
+                        threading.Thread(
+                            target=self.run_pending_restart,
+                            args=(deployment,),
+                            name=f"restart-when-idle-{deployment.name}",
+                            daemon=True,
+                        ).start()
+                        continue
+                    if deployment.pending_restart:
+                        try:
+                            self.write_restart_marker(deployment)
+                        except OSError:
+                            logger.warning(
+                                "Could not restore restart marker for deployment %s.",
+                                deployment.name,
+                            )
+                    else:
+                        try:
+                            self.restart_marker_path(deployment).unlink(missing_ok=True)
+                        except OSError:
+                            logger.warning(
+                                "Could not remove orphaned restart marker for deployment %s.",
+                                deployment.name,
+                            )
+
                     state, _, reason = self.deployment_health(deployment)
                     if state in {"healthy", "starting", "recovering"} or (
                         state == "stopped" and not deployment.desired_running

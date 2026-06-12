@@ -106,7 +106,9 @@ class TgCall(PyTgCalls):
         except Exception as exc:
             logger.warning("Could not leave voice call %s cleanly: %s", chat_id, exc)
 
-    async def has_active_group_call(self, chat_id: int) -> bool:
+    async def has_active_group_call(
+        self, chat_id: int, assume_active_on_error: bool = True
+    ) -> bool:
         try:
             peer = await asyncio.wait_for(app.resolve_peer(chat_id), timeout=30)
             channel = raw.types.InputChannel(
@@ -120,7 +122,7 @@ class TgCall(PyTgCalls):
             return bool(getattr(full_chat.full_chat, "call", None))
         except Exception as exc:
             logger.debug("Could not preflight voice chat %s: %s", chat_id, exc)
-            return True
+            return assume_active_on_error
 
 
     async def play_media(

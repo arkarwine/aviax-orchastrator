@@ -4,6 +4,7 @@
 
 
 import asyncio
+from pathlib import Path
 
 from pyrogram import enums, errors, types
 
@@ -20,6 +21,12 @@ def checkUB(play):
         if m.chat.type != enums.ChatType.SUPERGROUP:
             await m.reply_text(m.lang["play_chat_invalid"])
             return await app.leave_chat(chat_id)
+
+        if Path(".restart-when-idle").exists():
+            return await m.reply_text(
+                "⏳ A restart is waiting for the current streams to finish.\n\n"
+                "💡 New playback requests are paused until the restart completes."
+            )
 
         if not m.reply_to_message and (
             len(m.command) < 2 or (len(m.command) == 2 and m.command[1] == "-f")

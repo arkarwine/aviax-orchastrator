@@ -50,9 +50,16 @@ The ecosystem file sets `treekill: false`. This is required because PM2 otherwis
 /deploy <name>
 /stop <name>
 /delete <name>
-/restart <name>
+/restart <name|all>
 /logs <name>
+/addbotsudo <name> <user_id>
+/delbotsudo <name> <user_id>
+/botsudolist <name>
 ```
+
+Manager-authorized users can manage each deployed bot's sudo list directly with `/addbotsudo`, `/delbotsudo`, and `/botsudolist`.
+
+**Activation required:** After `/addbotsudo` or `/delbotsudo`, the deployed bot owner or an existing sudo user must run `/refreshconfig` in that deployed bot's private chat. The database change is stored immediately, but the running bot continues using its cached sudo list until `/refreshconfig` is issued.
 
 `/delete` stops the deployment if needed, permanently removes its deployment directory, and removes it from the manager store.
 
@@ -68,7 +75,12 @@ The ecosystem file sets `treekill: false`. This is required because PM2 otherwis
 
 `/changedb` safely stops the specified deployment, switches only its `DB_NAME`, and starts it again. It does not copy, migrate, or delete data from either database.
 
-`/restart <name>` restarts only the specified deployed bot. It does not restart the manager.
+`/restart <name>` restarts only the specified deployed bot. `/restart all` restarts every
+running deployment while preserving intentionally stopped deployments. If streams are
+active, each restart is persisted and waits until they finish. New playback requests are
+paused while a restart is queued. `/list` and `/status` show pending restarts, and
+`/stop <name>` cancels one while intentionally stopping the deployment. The requester is
+notified when a waiting restart begins and when it completes.
 
 `/logs <name>` sends a sanitized copy of the deployment's full run log.
 
