@@ -50,7 +50,8 @@ The ecosystem file sets `treekill: false`. This is required because PM2 otherwis
 /deploy <name>
 /stop <name>
 /delete <name>
-/restart <name|all>
+/restart <name|all> [force]
+/cancelrestart <name|all>
 /logs <name>
 /addbotsudo <name> <user_id>
 /delbotsudo <name> <user_id>
@@ -59,7 +60,10 @@ The ecosystem file sets `treekill: false`. This is required because PM2 otherwis
 
 Manager-authorized users can manage each deployed bot's sudo list directly with `/addbotsudo`, `/delbotsudo`, and `/botsudolist`.
 
-**Activation required:** After `/addbotsudo` or `/delbotsudo`, the deployed bot owner or an existing sudo user must run `/refreshconfig` in that deployed bot's private chat. The database change is stored immediately, but the running bot continues using its cached sudo list until `/refreshconfig` is issued.
+After `/addbotsudo` or `/delbotsudo`, the manager automatically asks a healthy running
+deployment to reload its sudo access and command menus. If the deployment is stopped,
+unhealthy, or does not confirm the refresh, the manager explains that `/refreshconfig`
+must be run manually after the deployment is available.
 
 `/delete` stops the deployment if needed, permanently removes its deployment directory, and removes it from the manager store.
 
@@ -82,6 +86,14 @@ paused while a restart is queued. `/list` and `/status` show pending restarts, a
 `/stop <name>` cancels one while intentionally stopping the deployment. The requester is
 notified when a waiting restart begins and when it completes.
 
+Use `/restart <name> force` only for emergencies. It restarts immediately even when
+streams are active. `/cancelrestart <name|all>` cancels queued safe restarts without
+stopping deployments.
+
+Lifecycle-changing manager commands use per-deployment operation locks so stop, deploy,
+restart, delete, reconfigure, database changes, and automatic recovery cannot overlap.
+Manager command activity is recorded as structured JSON lines in `manager_audit.jsonl`.
+
 `/logs <name>` sends a sanitized copy of the deployment's full run log.
 
 ## Health Monitoring
@@ -90,6 +102,13 @@ Deployed bots write a heartbeat every 15 seconds. The manager detects a process 
 still exists but no longer responds, captures diagnostics, and restarts it automatically.
 Automatic recovery stops after three attempts within one hour and sends an urgent alert.
 Intentional `/stop` commands never trigger automatic recovery.
+
+## Disaster Recovery Backup
+
+`/backup` and daily scheduled backups include manager state, source code, deployment
+environment files, Telegram session files, structured audit history, and Extended JSON
+exports of every deployment MongoDB database. The archive includes `RECOVERY.md` with
+restore instructions. It contains credentials and must be stored privately.
 
 Existing deployments are not restarted when the manager is upgraded or restarted.
 Heartbeat monitoring activates for them after their next manual or normal deployment restart.
@@ -149,6 +168,8 @@ These are runtime artifacts and must not be committed:
 
 - `manager.env`
 - `manager_deployments.json`
+- `manager_audit.jsonl`
+- `manager_backup_state.json`
 - `deployments/`
 - `*.session`
 - `*.session-journal`

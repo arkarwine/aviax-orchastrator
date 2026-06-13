@@ -29,6 +29,21 @@ class Bot(pyrogram.Client):
         self.bl_users = pyrogram.filters.user()
         self.sudoers = pyrogram.filters.user(self.owner)
 
+    async def warn_owner_about_logging(self, reason: str, action: str) -> None:
+        if not self.owner:
+            logger.warning("Could not send log-group warning because no owner is configured.")
+            return
+        try:
+            await self.send_message(
+                self.owner,
+                "⚠️ <b>Log group is unavailable after restart.</b>\n\n"
+                f"{reason}\n\n"
+                f"💡 {action}\n"
+                "🎵 The music bot will continue running normally without activity logging.",
+            )
+        except Exception as exc:
+            logger.warning("Could not notify owner about unavailable log group: %s", exc)
+
     async def boot(self):
         """Start the bot and enable optional log-group delivery when available."""
         await super().start()
@@ -40,8 +55,18 @@ class Bot(pyrogram.Client):
         if self.owner:
             self.sudoers.add(self.owner)
 
+        if config.LOGGING_DISABLED:
+            logger.info("Activity logging was disabled by the owner; skipping log group check.")
+            self.logger = 0
+            logger.info(f"Bot started as @{self.username}")
+            return
+
         if not self.logger:
             logger.info("Log group is not configured yet; skipping log group check.")
+            await self.warn_owner_about_logging(
+                "No log group is currently configured.",
+                "Create a group, add me, promote me as admin, then run <code>/setlog</code> there.",
+            )
             logger.info(f"Bot started as @{self.username}")
             return
 
@@ -55,6 +80,10 @@ class Bot(pyrogram.Client):
                 ex,
             )
             self.logger = 0
+            await self.warn_owner_about_logging(
+                "I could not reach the configured log group.",
+                "Add me back to the log group or check its availability, promote me as admin, then run <code>/setlog</code> there again.",
+            )
             logger.info(f"Bot started as @{self.username}")
             return
 
@@ -64,6 +93,10 @@ class Bot(pyrogram.Client):
                 self.logger,
             )
             self.logger = 0
+            await self.warn_owner_about_logging(
+                "I am not an administrator in the configured log group.",
+                "Promote me as admin in the log group, then run <code>/setlog</code> there again.",
+            )
         logger.info(f"Bot started as @{self.username}")
 
     async def exit(self):

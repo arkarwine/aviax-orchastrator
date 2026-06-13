@@ -14,9 +14,9 @@ import threading
 import time
 import traceback
 import uuid
-import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -27,15 +27,18 @@ from pyrogram.types import Message, ReplyParameters
 from pymongo import AsyncMongoClient
 import psutil
 
+from manager_support import AuditLog, DeploymentOperations, RecoveryBackup
+
 ROOT = Path(__file__).resolve().parent
 MANAGER_ENV = ROOT / "manager.env"
 STORE_PATH = ROOT / "manager_deployments.json"
 SUDO_STORE_PATH = ROOT / "manager_sudoers.json"
 BACKUP_STATE_PATH = ROOT / "manager_backup_state.json"
-DEPLOYED_REFRESH_NOTICE = (
+AUDIT_LOG_PATH = ROOT / "manager_audit.jsonl"
+DEPLOYED_REFRESH_FALLBACK_NOTICE = (
     "⚡ <b>Activation required:</b> Have the deployed bot owner or an existing sudo user "
     "run <code>/refreshconfig</code> in that deployed bot's private chat. "
-    "The stored change will not affect the running bot until then."
+    "The stored change could not be applied to the running bot automatically."
 )
 DEPLOYMENT_ENV_KEYS = {
     "API_ID",
@@ -325,17 +328,79 @@ def env_from_template(**values: str) -> Dict[str, str]:
 
 
 def handler_errors(func):
+    @wraps(func)
     async def wrapper(self, client: Client, message: Message):
+        issuer_id = message.from_user.id if message.from_user else None
+        deployment = None
+        parts = (message.text or "").split(maxsplit=2)
+        deployment_commands = {
+            "add_bot_sudo",
+            "bot_sudo_list",
+            "cancel_restart",
+            "change_database",
+            "delete",
+            "del_bot_sudo",
+            "deploy",
+            "logs",
+            "reconfigure",
+            "restart",
+            "status",
+            "stop",
+        }
+        if func.__name__ in deployment_commands and len(parts) > 1 and parts[1].lower() != "all":
+            deployment = normalize_name(parts[1])
+        if hasattr(self, "audit"):
+            self.audit.record(
+                func.__name__,
+                issuer_id=issuer_id,
+                deployment=deployment,
+            )
         try:
             await func(self, client, message)
+            if hasattr(self, "audit"):
+                self.audit.record(
+                    func.__name__,
+                    issuer_id=issuer_id,
+                    deployment=deployment,
+                    result="completed",
+                )
         except Exception as exc:
             logger.exception("Handler %s failed: %s", func.__name__, exc)
+            if hasattr(self, "audit"):
+                self.audit.record(
+                    func.__name__,
+                    issuer_id=issuer_id,
+                    deployment=deployment,
+                    result="failed",
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
             await message.reply_text(
                 "❌ I could not complete that request.\n\n"
                 "💡 Check the command arguments and try again. If it keeps failing, review the manager logs.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
     return wrapper
+
+
+def deployment_operation(operation: str):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(self, client: Client, message: Message):
+            parts = (message.text or "").split(maxsplit=2)
+            if len(parts) < 2 or parts[1].strip().lower() == "all":
+                return await func(self, client, message)
+            name = normalize_name(parts[1])
+            with self.operations.acquire(name, operation, token=object()) as acquired:
+                if not acquired:
+                    return await message.reply_text(
+                        f"⏳ Deployment <b>{name}</b> is busy with "
+                        f"<code>{html.escape(self.operations.current(name) or 'another operation')}</code>.\n\n"
+                        "💡 Wait for that operation to finish, then try again.",
+                        reply_parameters=ReplyParameters(message_id=message.id),
+                    )
+                return await func(self, client, message)
+        return wrapper
+    return decorator
 
 
 class BotManager:
@@ -356,6 +421,18 @@ class BotManager:
         self.restarting: set[str] = set()
         self.recovery_guard = threading.Lock()
         self.backup_lock = threading.Lock()
+        self.operations = DeploymentOperations()
+        self.audit = AuditLog(AUDIT_LOG_PATH)
+        self.recovery_backup = RecoveryBackup(
+            root=ROOT,
+            store=self.store,
+            manager_env=MANAGER_ENV,
+            store_path=STORE_PATH,
+            sudo_store_path=SUDO_STORE_PATH,
+            audit_path=AUDIT_LOG_PATH,
+            backup_state_path=BACKUP_STATE_PATH,
+            load_env=self.load_deployment_env,
+        )
         self.app = Client(
             name="deploy-manager",
             api_id=self.config.api_id,
@@ -382,6 +459,7 @@ class BotManager:
         self.app.on_message(filters.private & filters.command("stop") & self.authorized_filter)(self.stop)
         self.app.on_message(filters.private & filters.command("delete") & self.authorized_filter)(self.delete)
         self.app.on_message(filters.private & filters.command("restart") & self.authorized_filter)(self.restart)
+        self.app.on_message(filters.private & filters.command("cancelrestart") & self.authorized_filter)(self.cancel_restart)
         self.app.on_message(filters.private & filters.command("logs") & self.authorized_filter)(self.logs)
         self.app.on_message(filters.private & filters.command("sudolist") & self.authorized_filter)(self.sudolist)
         self.app.on_message(filters.private & filters.command("addsudo") & owner)(self.addsudo)
@@ -411,14 +489,15 @@ class BotManager:
             "▶️ /deploy &lt;name&gt; - Start a stopped deployment.\n"
             "⏹️ /stop &lt;name&gt; - Stop a running deployment.\n"
             "🗑️ /delete &lt;name&gt; - Permanently delete a deployment.\n"
-            "🔄 /restart &lt;name|all&gt; - Restart one or all running deployments when their active streams finish.\n"
+            "🔄 /restart &lt;name|all&gt; [force] - Restart safely, or force an emergency restart.\n"
+            "✖️ /cancelrestart &lt;name|all&gt; - Cancel queued restart requests.\n"
             "📄 /logs &lt;name&gt; - Retrieve a deployment's full log.\n"
             "👥 /sudolist - View manager owner and sudo users.\n"
             "➕ /addsudo &lt;user_id&gt; - Grant manager access. Owner only.\n"
             "➖ /delsudo &lt;user_id&gt; - Remove manager access. Owner only.\n"
-            "💾 /backup - Send a recovery configuration backup. Owner only.\n"
-            "🛡️ /addbotsudo &lt;deployment&gt; &lt;user_id&gt; - Add a deployed-bot sudo user; requires /refreshconfig.\n"
-            "🚫 /delbotsudo &lt;deployment&gt; &lt;user_id&gt; - Remove a deployed-bot sudo user; requires /refreshconfig.\n"
+            "💾 /backup - Send a full disaster-recovery backup including databases. Owner only.\n"
+            "🛡️ /addbotsudo &lt;deployment&gt; &lt;user_id&gt; - Add a deployed-bot sudo user and refresh it live.\n"
+            "🚫 /delbotsudo &lt;deployment&gt; &lt;user_id&gt; - Remove a deployed-bot sudo user and refresh it live.\n"
             "👥 /botsudolist &lt;deployment&gt; - View a deployed bot's sudo users.\n",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
@@ -519,6 +598,89 @@ class BotManager:
         mongo = AsyncMongoClient(mongo_url, serverSelectionTimeoutMS=12500)
         return mongo, mongo[db_name], env
 
+    async def request_runtime_control(
+        self,
+        deployment: DeploymentMeta,
+        operation: str,
+    ) -> tuple[bool, str, dict]:
+        if not self.process_matches(deployment):
+            return False, "the deployment is not running", {}
+        health = self.read_health(deployment)
+        try:
+            healthy = (
+                health
+                and health.get("state") == "healthy"
+                and time.time() - float(health.get("timestamp", 0)) <= self.health_stale_after
+            )
+        except (TypeError, ValueError):
+            healthy = False
+        if not healthy:
+            return False, "the deployment is not currently reporting a healthy heartbeat", {}
+
+        request_id = uuid.uuid4().hex
+        request_path = deployment.deployment_path / f".runtime-control-{request_id}.json"
+        result_path = deployment.deployment_path / f".runtime-control-result-{request_id}.json"
+        temporary = request_path.with_suffix(".json.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(
+                    {
+                        "request_id": request_id,
+                        "operation": operation,
+                        "requested_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    ensure_ascii=True,
+                ),
+                encoding="utf-8",
+            )
+            temporary.replace(request_path)
+        except OSError as exc:
+            logger.warning(
+                "Could not request live sudo refresh for %s: %s",
+                deployment.name,
+                exc,
+            )
+            return False, "the manager could not reach the deployment's runtime control file", {}
+
+        deadline = time.monotonic() + max(20, self.monitor_interval + 10)
+        try:
+            while time.monotonic() < deadline:
+                if result_path.exists():
+                    result = json.loads(result_path.read_text(encoding="utf-8"))
+                    if result.get("success"):
+                        data = result.get("data") or {}
+                        warnings = data.get("warnings") or []
+                        if warnings:
+                            return True, "the live update applied, but some command menus could not be updated", data
+                        return True, "the live update was applied automatically", data
+                    logger.warning(
+                        "Deployment %s rejected live sudo refresh: %s",
+                        deployment.name,
+                        result.get("error") or "unknown error",
+                    )
+                    return False, "the deployed bot could not apply the live update", {}
+                if not self.process_matches(deployment):
+                    return False, "the deployment stopped before confirming the live update", {}
+                await asyncio.sleep(1)
+            return False, "the deployed bot did not confirm the live update in time", {}
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning(
+                "Could not read live sudo refresh result for %s: %s",
+                deployment.name,
+                exc,
+            )
+            return False, "the manager could not read the deployed bot's update result", {}
+        finally:
+            request_path.unlink(missing_ok=True)
+            result_path.unlink(missing_ok=True)
+
+    async def refresh_deployment_sudoers(
+        self,
+        deployment: DeploymentMeta,
+    ) -> tuple[bool, str]:
+        success, detail, _ = await self.request_runtime_control(deployment, "refresh_sudoers")
+        return success, detail
+
     def parse_bot_sudo_args(
         self,
         message: Message,
@@ -582,9 +744,22 @@ class BotManager:
             else f"<code>{user_id}</code>"
         )
         state = "already had sudo access" if not result.modified_count else "was added"
+        if result.modified_count:
+            await status.edit_text(
+                f"✅ {label} {state} on <b>{deployment.name}</b>.\n\n"
+                "⚡ Applying the updated access to the running bot..."
+            )
+            refreshed, refresh_detail = await self.refresh_deployment_sudoers(deployment)
+        else:
+            refreshed, refresh_detail = True, "no live refresh was needed"
+        activation = (
+            f"⚡ {refresh_detail}."
+            if refreshed
+            else f"⚠️ Automatic refresh was unavailable because {refresh_detail}.\n\n{DEPLOYED_REFRESH_FALLBACK_NOTICE}"
+        )
         await status.edit_text(
             f"✅ {label} {state} on <b>{deployment.name}</b>.\n\n"
-            f"{DEPLOYED_REFRESH_NOTICE}"
+            f"{activation}"
         )
 
     @handler_errors
@@ -630,9 +805,22 @@ class BotManager:
                 await mongo.close()
 
         state = "was removed" if result.modified_count else "was not in the sudo list"
+        if result.modified_count:
+            await status.edit_text(
+                f"✅ <code>{user_id}</code> {state} on <b>{deployment.name}</b>.\n\n"
+                "⚡ Applying the updated access to the running bot..."
+            )
+            refreshed, refresh_detail = await self.refresh_deployment_sudoers(deployment)
+        else:
+            refreshed, refresh_detail = True, "no live refresh was needed"
+        activation = (
+            f"⚡ {refresh_detail}."
+            if refreshed
+            else f"⚠️ Automatic refresh was unavailable because {refresh_detail}.\n\n{DEPLOYED_REFRESH_FALLBACK_NOTICE}"
+        )
         await status.edit_text(
             f"✅ <code>{user_id}</code> {state} on <b>{deployment.name}</b>.\n\n"
-            f"{DEPLOYED_REFRESH_NOTICE}"
+            f"{activation}"
         )
 
     @handler_errors
@@ -694,43 +882,8 @@ class BotManager:
             lines.append("\n📭 No additional sudo users.")
         await status.edit_text("\n".join(lines))
 
-    def backup_sources(self) -> list[tuple[Path, str]]:
-        sources = []
-        for path, archive_name in (
-            (MANAGER_ENV, "manager.env"),
-            (STORE_PATH, "manager_deployments.json"),
-            (SUDO_STORE_PATH, "manager_sudoers.json"),
-        ):
-            if path.is_file():
-                sources.append((path, archive_name))
-        for deployment in self.store.list().values():
-            env_path = deployment.deployment_path / ".env"
-            if env_path.is_file():
-                sources.append((env_path, f"deployments/{deployment.name}/.env"))
-        return sources
-
-    def create_backup_archive(self) -> Path:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        archive_path = Path(tempfile.gettempdir()) / f"aviax-manager-backup-{timestamp}.zip"
-        deployments = self.store.list()
-        manifest = {
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "deployment_count": len(deployments),
-            "deployments": sorted(deployments),
-            "contains_secrets": True,
-            "contents": [
-                "manager.env",
-                "manager_deployments.json",
-                "manager_sudoers.json",
-                "deployment .env files",
-            ],
-            "excluded": ["logs", "downloads", "cache", "session files", "MongoDB data"],
-        }
-        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("BACKUP_MANIFEST.json", json.dumps(manifest, indent=2))
-            for source, archive_name in self.backup_sources():
-                archive.write(source, archive_name)
-        return archive_path
+    async def create_backup_archive(self) -> Path:
+        return await self.recovery_backup.create_archive()
 
     def read_backup_state(self) -> dict:
         try:
@@ -755,7 +908,7 @@ class BotManager:
             return False, "A backup is already in progress."
         archive_path = None
         try:
-            archive_path = self.create_backup_archive()
+            archive_path = await self.create_backup_archive()
             caption = (
                 "💾 <b>Daily manager recovery backup</b>\n\n"
                 if scheduled
@@ -763,9 +916,15 @@ class BotManager:
             )
             caption += (
                 f"Deployments: <code>{len(self.store.list())}</code>\n"
-                "⚠️ Contains credentials and deployment secrets. Store it securely.\n"
-                "ℹ️ MongoDB data, downloads, logs, caches, and session files are not included."
+                "⚠️ Contains credentials, Telegram sessions, and database data. Store it securely.\n"
+                "ℹ️ Includes recovery instructions. Downloads, logs, and caches are excluded."
             )
+            if self.recovery_backup.last_database_errors:
+                caption += (
+                    "\n\n🚨 <b>Incomplete database export:</b> "
+                    f"<code>{len(self.recovery_backup.last_database_errors)}</code> deployment database(s) failed. "
+                    "Check the archive manifest and retry the backup."
+                )
             for attempt in range(1, 4):
                 try:
                     await self.app.send_document(
@@ -780,6 +939,11 @@ class BotManager:
                     await asyncio.sleep(attempt * 3)
             self.save_backup_state(success=True)
             logger.info("Manager recovery backup sent to owner.")
+            if self.recovery_backup.last_database_errors:
+                return True, (
+                    f"{len(self.recovery_backup.last_database_errors)} deployment database export(s) failed. "
+                    "Check the archive manifest and retry."
+                )
             return True, ""
         except Exception as exc:
             logger.exception("Could not create or send manager recovery backup")
@@ -801,7 +965,12 @@ class BotManager:
         )
         success, error = await self.send_backup(scheduled=False)
         if success:
-            return await status.edit_text("✅ Recovery backup sent to the manager owner.")
+            if error:
+                return await status.edit_text(
+                    "⚠️ Recovery backup sent, but it is incomplete.\n\n"
+                    f"Reason: <code>{html.escape(error)}</code>"
+                )
+            return await status.edit_text("✅ Full disaster-recovery backup sent to the manager owner.")
         await status.edit_text(
             "❌ I could not send the recovery backup.\n\n"
             f"Reason: <code>{html.escape(error)}</code>"
@@ -814,11 +983,16 @@ class BotManager:
 
         lines = ["<b>📋 Deployments</b>"]
         for name, deployment in self.store.list().items():
-            state, _, _ = self.deployment_health(deployment)
+            state, health, _ = self.deployment_health(deployment)
             status = self.format_health_state(state)
             pending = " — <code>🔄 restart queued</code>" if deployment.pending_restart else ""
+            streams = int((health or {}).get("active_voice_chats", 0) or 0)
+            stream_text = f" — <code>🎵 {streams}</code>" if streams else ""
+            operation = self.operations.current(name)
+            operation_text = f" — <code>⚙️ {operation}</code>" if operation else ""
             lines.append(
-                f"<b>{deployment.username}</b> ({name}) — <code>{status}</code>{pending}"
+                f"<b>{deployment.username}</b> ({name}) — <code>{status}</code>"
+                f"{stream_text}{pending}{operation_text}"
             )
         await message.reply_text("\n".join(lines), reply_parameters=ReplyParameters(message_id=message.id))
 
@@ -856,7 +1030,22 @@ class BotManager:
                 f"\nHeartbeat age: <code>{age_text}</code>"
                 f"\nEvent-loop delay: <code>{health.get('event_loop_delay', 0)}s</code>"
                 f"\nActive calls: <code>{health.get('active_voice_chats', 0)}</code>"
+                f"\nAssistants online: <code>{health.get('assistants_online', 0)}</code>"
+                f"\nPlayback operations: <code>{html.escape(str(health.get('playback_operations', {})))[:400]}</code>"
             )
+        if deployment.pid and self.process_matches(deployment):
+            try:
+                process = psutil.Process(deployment.pid)
+                text += (
+                    f"\nCPU: <code>{process.cpu_percent(interval=0.1):.1f}%</code>"
+                    f"\nMemory: <code>{process.memory_info().rss / 1024**2:.1f} MB</code>"
+                    f"\nChild processes: <code>{len(process.children(recursive=True))}</code>"
+                )
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        operation = self.operations.current(name)
+        if operation:
+            text += f"\nManager operation: <code>{html.escape(operation)}</code>"
         if reason:
             text += f"\nReason: <code>{html.escape(reason)}</code>"
         if deployment.last_failure:
@@ -869,6 +1058,7 @@ class BotManager:
         await message.reply_text(text, reply_parameters=ReplyParameters(message_id=message.id))
 
     @handler_errors
+    @deployment_operation("deploy")
     async def deploy(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
@@ -906,6 +1096,7 @@ class BotManager:
             )
 
     @handler_errors
+    @deployment_operation("stop")
     async def stop(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
@@ -986,6 +1177,7 @@ class BotManager:
                 Path(sanitized_path).unlink(missing_ok=True)
 
     @handler_errors
+    @deployment_operation("delete")
     async def delete(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
@@ -1048,16 +1240,23 @@ class BotManager:
 
     @handler_errors
     async def restart(self, client: Client, message: Message) -> None:
-        args = message.text.split(maxsplit=1)
+        args = message.text.split(maxsplit=2)
         if len(args) < 2:
             return await message.reply_text(
-                "🔄 Usage: <code>/restart &lt;name|all&gt;</code>\n\n"
+                "🔄 Usage: <code>/restart &lt;name|all&gt; [force]</code>\n\n"
                 "💡 Use <code>/list</code> to check registered deployment names.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        force = len(args) > 2 and args[2].strip().lower() == "force"
+        if len(args) > 2 and not force:
+            return await message.reply_text(
+                "❌ Unknown restart option.\n\n"
+                "💡 Use <code>force</code> only when you need an immediate emergency restart.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
         if args[1].strip().lower() == "all":
-            return await self.restart_all(message)
+            return await self.restart_all(message, force=force)
 
         name = normalize_name(args[1])
         deployment = self.store.get(name)
@@ -1072,7 +1271,12 @@ class BotManager:
             f"🔎 Checking active streams for deployment <b>{name}</b>...",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
-        result, detail = await self.request_restart(deployment, message.from_user.id, status)
+        result, detail = await self.request_restart(
+            deployment,
+            message.from_user.id,
+            status,
+            force=force,
+        )
         if result == "waiting":
             return await status.edit_text(
                 f"⏳ Restart for deployment <b>{name}</b> is waiting.\n\n"
@@ -1082,7 +1286,61 @@ class BotManager:
             )
         await status.edit_text(detail)
 
-    async def restart_all(self, message: Message) -> None:
+    @handler_errors
+    async def cancel_restart(self, client: Client, message: Message) -> None:
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            return await message.reply_text(
+                "✖️ Usage: <code>/cancelrestart &lt;name|all&gt;</code>",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        target = args[1].strip().lower()
+        deployments = (
+            list(self.store.list().values())
+            if target == "all"
+            else [self.store.get(normalize_name(target))]
+        )
+        if not deployments or deployments == [None]:
+            return await message.reply_text(
+                f"❌ Deployment <b>{html.escape(target)}</b> was not found.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        cancelled = []
+        untouched = []
+        busy = []
+        for deployment in deployments:
+            with self.operations.acquire(
+                deployment.name,
+                "cancel queued restart",
+                token=object(),
+            ) as acquired:
+                if not acquired:
+                    busy.append(deployment.name)
+                    continue
+                if deployment.pending_restart:
+                    self.clear_pending_restart(deployment)
+                    self.store.update(deployment)
+                    cancelled.append(deployment.name)
+                    self.audit.record(
+                        "cancel_restart",
+                        issuer_id=message.from_user.id,
+                        deployment=deployment.name,
+                        result="success",
+                    )
+                else:
+                    untouched.append(deployment.name)
+        text = (
+            f"✅ Cancelled queued restart for: <code>{', '.join(cancelled)}</code>"
+            if cancelled
+            else "📭 No queued restarts were found."
+        )
+        if untouched and target != "all":
+            text += "\n\nℹ️ That deployment did not have a queued restart."
+        if busy:
+            text += "\n\n⏳ Could not cancel while busy: <code>" + ", ".join(busy) + "</code>"
+        await message.reply_text(text, reply_parameters=ReplyParameters(message_id=message.id))
+
+    async def restart_all(self, message: Message, *, force: bool = False) -> None:
         deployments = list(self.store.list().values())
         if not deployments:
             return await message.reply_text(
@@ -1111,6 +1369,7 @@ class BotManager:
                 message.from_user.id,
                 status,
                 bulk=True,
+                force=force,
             )
             if result in counts:
                 counts[result] += 1
@@ -1144,6 +1403,7 @@ class BotManager:
         status: Message,
         *,
         bulk: bool = False,
+        force: bool = False,
     ) -> tuple[str, str]:
         name = deployment.name
         if name in self.recovering:
@@ -1157,7 +1417,35 @@ class BotManager:
                 "restart is already underway",
             )
 
-        if deployment.is_running:
+        operation = "force restart" if force else "restart"
+        with self.operations.acquire(name, operation, token=object()) as acquired:
+            if not acquired:
+                return "skipped", f"{self.operations.current(name)} is already in progress"
+            return await self._request_restart_locked(
+                deployment,
+                requested_by,
+                status,
+                bulk=bulk,
+                force=force,
+            )
+
+    async def _request_restart_locked(
+        self,
+        deployment: DeploymentMeta,
+        requested_by: int,
+        status: Message,
+        *,
+        bulk: bool = False,
+        force: bool = False,
+    ) -> tuple[str, str]:
+        name = deployment.name
+        self.audit.record(
+            "restart",
+            issuer_id=requested_by,
+            deployment=name,
+            detail="force" if force else "safe",
+        )
+        if deployment.is_running and not force:
             deployment.pending_restart = True
             deployment.restart_requested_at = datetime.now(timezone.utc).isoformat()
             deployment.restart_requested_by = requested_by
@@ -1187,8 +1475,11 @@ class BotManager:
                 )
 
         await status.edit_text(
-            f"⚡ Deployment <b>{name}</b> has no active streams.\n\n"
-            "🔄 Restarting immediately..."
+            (
+                f"🚨 Force restarting deployment <b>{name}</b> immediately..."
+                if force
+                else f"⚡ Deployment <b>{name}</b> has no active streams.\n\n🔄 Restarting immediately..."
+            )
         )
         if deployment.is_running:
             await status.edit_text(f"⏹️ Stopping deployment <b>{name}</b>...")
@@ -1221,6 +1512,13 @@ class BotManager:
         deployment.started_at = datetime.now(timezone.utc).isoformat()
         self.clear_pending_restart(deployment)
         self.store.update(deployment)
+        self.audit.record(
+            "restart",
+            issuer_id=requested_by,
+            deployment=name,
+            result="success",
+            detail="force" if force else "safe",
+        )
         return (
             "restarted",
             (
@@ -1369,6 +1667,7 @@ class BotManager:
             )
 
     @handler_errors
+    @deployment_operation("reconfigure")
     async def reconfigure(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=3)
         if len(args) < 3:
@@ -1517,6 +1816,7 @@ class BotManager:
         )
 
     @handler_errors
+    @deployment_operation("change database")
     async def change_database(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=2)
         if len(args) < 3:
@@ -1753,6 +2053,17 @@ class BotManager:
             logger.warning("Could not remove restart marker for deployment %s.", deployment.name)
 
     def run_pending_restart(self, deployment: DeploymentMeta) -> None:
+        with self.operations.acquire(deployment.name, "queued restart") as acquired:
+            if not acquired:
+                logger.info(
+                    "Queued restart for %s is waiting for operation %s.",
+                    deployment.name,
+                    self.operations.current(deployment.name),
+                )
+                return
+            self._run_pending_restart_locked(deployment)
+
+    def _run_pending_restart_locked(self, deployment: DeploymentMeta) -> None:
         with self.recovery_guard:
             if (
                 deployment.name in self.restarting
@@ -1815,6 +2126,12 @@ class BotManager:
                 requested_by,
                 f"✅ Deployment <b>{deployment.name}</b> restarted after all active streams finished.\n"
                 f"PID: <code>{deployment.pid}</code>",
+            )
+            self.audit.record(
+                "queued_restart",
+                issuer_id=requested_by,
+                deployment=deployment.name,
+                result="success",
             )
         finally:
             with self.recovery_guard:
@@ -1940,7 +2257,23 @@ class BotManager:
         return recent
 
     def recover_deployment(self, deployment: DeploymentMeta, reason: str) -> None:
+        with self.operations.acquire(deployment.name, "automatic recovery") as acquired:
+            if not acquired:
+                logger.info(
+                    "Automatic recovery for %s deferred while %s is active.",
+                    deployment.name,
+                    self.operations.current(deployment.name),
+                )
+                return
+            self._recover_deployment_locked(deployment, reason)
+
+    def _recover_deployment_locked(self, deployment: DeploymentMeta, reason: str) -> None:
         queued_restart_requester = deployment.restart_requested_by
+        self.audit.record(
+            "automatic_recovery",
+            deployment=deployment.name,
+            detail=reason,
+        )
         with self.recovery_guard:
             if (
                 deployment.name in self.recovering
@@ -2031,6 +2364,12 @@ class BotManager:
                 )
                 return
             if recovered:
+                self.audit.record(
+                    "automatic_recovery",
+                    deployment=deployment.name,
+                    result="success",
+                    detail=reason,
+                )
                 self._notify_owner(
                     report
                     + f"\n\n✅ Deployment <b>{deployment.name}</b> was restarted automatically because it stopped responding."

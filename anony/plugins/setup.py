@@ -97,6 +97,79 @@ async def _setup_status(_, m: types.Message):
     await m.reply_text(setup_text())
 
 
+@app.on_message(filters.command(["checksetup"]) & filters.private & ~app.bl_users)
+@lang.language()
+async def _check_setup(_, m: types.Message):
+    if not is_owner(m.from_user.id):
+        return await m.reply_text("🔒 Only the deployment owner or a sudo user can check setup.")
+
+    status = await m.reply_text("🔎 Checking deployment readiness...")
+    ready = []
+    warnings = []
+    blockers = []
+
+    if app.owner:
+        ready.append(f"👑 Owner configured: <code>{app.owner}</code>")
+    else:
+        blockers.append("👑 No owner is configured. Send <code>/start</code> to claim ownership.")
+
+    configured_slots = [
+        slot for slot in range(1, 4) if getattr(config, f"SESSION{slot}")
+    ]
+    online_slots = userbot.available_slots()
+    if online_slots:
+        ready.append(
+            "👤 Online assistant slots: <code>"
+            + ", ".join(map(str, online_slots))
+            + "</code>"
+        )
+    elif configured_slots:
+        blockers.append(
+            "👤 Assistant sessions are configured but offline. Restart the deployment and inspect its logs."
+        )
+    else:
+        blockers.append(
+            "👤 No assistant session is configured. Add one with <code>/addsession</code>."
+        )
+
+    if config.LOGGING_DISABLED:
+        ready.append("🔕 Activity logging is intentionally disabled.")
+    elif app.logger:
+        ready.append(f"🏠 Log group available: <code>{app.logger}</code>")
+    elif config.LOGGER_ID:
+        warnings.append(
+            "🏠 The configured log group is unreachable or missing admin access. Run <code>/setlog</code> there again."
+        )
+    else:
+        warnings.append(
+            "🏠 No log group is configured. Use <code>/setlog</code>, or <code>/disablelog</code> to stop restart warnings."
+        )
+
+    if config.SUPPORT_CHAT:
+        ready.append("💬 Support group configured.")
+    else:
+        warnings.append("💬 Support group is not configured. Use <code>/support &lt;link&gt;</code>.")
+    if config.SUPPORT_CHANNEL:
+        ready.append("📣 Updates channel configured.")
+    else:
+        warnings.append("📣 Updates channel is not configured. Use <code>/updates &lt;link&gt;</code>.")
+    ready.append(f"🌐 Default language: <code>{config.LANG_CODE}</code>")
+
+    heading = (
+        "✅ <b>Deployment is ready.</b>"
+        if not blockers
+        else "❌ <b>Deployment setup needs attention.</b>"
+    )
+    sections = [heading]
+    if blockers:
+        sections.append("<b>Required fixes</b>\n" + "\n".join(blockers))
+    if warnings:
+        sections.append("<b>Optional improvements</b>\n" + "\n".join(warnings))
+    if ready:
+        sections.append("<b>Ready</b>\n" + "\n".join(ready))
+    await status.edit_text("\n\n".join(sections))
+
+
 @app.on_message(filters.command(["setlog"]) & ~app.bl_users)
 @lang.language()
 async def _set_log_group(_, m: types.Message):
@@ -125,13 +198,15 @@ async def _set_log_group(_, m: types.Message):
     await status.edit_text("💾 Saving this group as the log group...")
     try:
         await db.set_config("LOGGER_ID", m.chat.id)
+        await db.set_config("LOGGING_DISABLED", False)
+        await db.set_logger(True)
     except Exception:
         logger.exception("Could not save log group %s", m.chat.id)
         return await status.edit_text(
             "❌ I could not save this log group.\n\n"
             "💡 Check the database connection, then run <code>/setlog</code> again."
         )
-    config.apply_runtime_config({"LOGGER_ID": m.chat.id})
+    config.apply_runtime_config({"LOGGER_ID": m.chat.id, "LOGGING_DISABLED": False})
     app.logger = m.chat.id
     started = 0
     if has_assistant_session() and not userbot.clients:
@@ -155,6 +230,28 @@ async def _set_log_group(_, m: types.Message):
     await status.edit_text(
         message + "\n\n➡️ Next: connect an assistant user account in private chat.",
         reply_markup=buttons.setup_next_session(),
+    )
+
+
+@app.on_message(filters.command(["disablelog"]) & filters.private & ~app.bl_users)
+@lang.language()
+async def _disable_log_group(_, m: types.Message):
+    if not is_owner(m.from_user.id):
+        return await m.reply_text("🔒 Only the deployment owner or a sudo user can disable logging.")
+    try:
+        await db.set_config("LOGGER_ID", 0)
+        await db.set_config("LOGGING_DISABLED", True)
+        await db.set_logger(False)
+    except Exception:
+        logger.exception("Could not disable deployment logging")
+        return await m.reply_text(
+            "❌ I could not disable logging.\n\n💡 Check the database connection and try again."
+        )
+    config.apply_runtime_config({"LOGGER_ID": 0, "LOGGING_DISABLED": True})
+    app.logger = 0
+    await m.reply_text(
+        "✅ Activity logging and restart warnings are disabled.\n\n"
+        "💡 Run <code>/setlog</code> inside a group whenever you want to enable logging again."
     )
 
 

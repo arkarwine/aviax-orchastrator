@@ -8,6 +8,7 @@ manager.env
 manager_deployments.json
 manager_sudoers.json
 manager_backup_state.json
+manager_audit.jsonl
 
 *.session
 *.session-journal
@@ -15,6 +16,8 @@ log.txt
 run.log
 .health.json
 .manager-launch.pid
+.restart-when-idle
+.runtime-control-*.json
 
 cache/
 downloads/

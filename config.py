@@ -29,6 +29,7 @@ class Config:
         "API_URL", "VIDEO_API_URL", "API_KEY", "AUTO_LEAVE", "AUTO_END",
         "THUMB_GEN", "VIDEO_PLAY", "LANG_CODE", "COOKIES_URL", "DEFAULT_THUMB",
         "PING_IMG", "START_IMG",
+        "LOGGING_DISABLED",
     }
 
     def __init__(self, values: dict | None = None):
@@ -46,6 +47,7 @@ class Config:
 
         self.OWNER_ID = self.integer("OWNER_ID", 0)
         self.LOGGER_ID = self.managed_int("LOGGER_ID")
+        self.LOGGING_DISABLED = self.boolean("LOGGING_DISABLED")
 
         self.DURATION_LIMIT = self.integer("DURATION_LIMIT", 60) * 60
         self.QUEUE_LIMIT = self.integer("QUEUE_LIMIT", 20)
@@ -97,6 +99,7 @@ class Config:
             "OWNER_LINK": self.OWNER_LINK,
             "COOKIES_URL": self.COOKIES_URL,
             "DOWNLOADS_PATH": self.DOWNLOADS_PATH,
+            "LOGGING_DISABLED": self.LOGGING_DISABLED,
         }
         del self._values
 
@@ -153,7 +156,7 @@ class Config:
                     ]
                 else:
                     self.COOKIES_URL = value or []
-            elif key in {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY"}:
+            elif key in {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY", "LOGGING_DISABLED"}:
                 self.__dict__[key] = parse_bool(value)
             elif key == "API_KEY":
                 self.API_KEY = value if value else None

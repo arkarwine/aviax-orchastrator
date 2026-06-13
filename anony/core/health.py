@@ -43,6 +43,75 @@ class HealthReporter:
         )
         temporary.replace(self.path)
 
+    async def process_control_requests(self) -> None:
+        from anony import app, db
+        from anony.core.commands import sync_command_menus
+
+        async def refresh_sudoers() -> dict:
+            previous_privileged = set(app.sudoers)
+            sudoers = set(await db.get_sudoers())
+            if app.owner:
+                sudoers.add(app.owner)
+            app.sudoers.clear()
+            app.sudoers.update(sudoers)
+            try:
+                warnings = await asyncio.wait_for(
+                    sync_command_menus(previous_privileged),
+                    timeout=45,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Command menu refresh timed out.")
+                warnings = ["command menu refresh timed out"]
+            except Exception:
+                logger.exception("Command menu refresh failed.")
+                warnings = ["command menu refresh failed"]
+            return {"warnings": warnings, "sudoer_count": len(app.sudoers)}
+
+        async def check_setup() -> dict:
+            from anony import config, userbot
+
+            return {
+                "owner_configured": bool(app.owner),
+                "assistant_slots_online": userbot.available_slots(),
+                "logger_available": bool(app.logger),
+                "logging_disabled": bool(config.LOGGING_DISABLED),
+            }
+
+        handlers = {
+            "refresh_sudoers": refresh_sudoers,
+            "check_setup": check_setup,
+        }
+        for request_path in Path.cwd().glob(".runtime-control-*.json"):
+            if request_path.name.startswith(".runtime-control-result-"):
+                continue
+            request_id = request_path.stem.removeprefix(".runtime-control-")
+            result_path = Path.cwd() / f".runtime-control-result-{request_id}.json"
+            result = {"request_id": request_id, "success": False}
+            try:
+                request = json.loads(request_path.read_text(encoding="utf-8"))
+                if request.get("request_id") != request_id:
+                    raise ValueError("request identity does not match its filename")
+                operation = request.get("operation")
+                handler = handlers.get(operation)
+                if not handler:
+                    raise ValueError("unsupported runtime control operation")
+                result.update({"success": True, "data": await handler()})
+                logger.info("Applied runtime control request %s operation=%s.", request_id, operation)
+            except Exception as exc:
+                logger.exception("Runtime control request %s failed.", request_id)
+                result["error"] = f"{type(exc).__name__}: {exc}"[:300]
+            finally:
+                temporary = result_path.with_suffix(".json.tmp")
+                try:
+                    temporary.write_text(
+                        json.dumps(result, ensure_ascii=True),
+                        encoding="utf-8",
+                    )
+                    temporary.replace(result_path)
+                    request_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.exception("Could not save runtime control result %s.", request_id)
+
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         expected = loop.time()
@@ -53,6 +122,11 @@ class HealthReporter:
                 self.write(event_loop_delay=loop.time() - expected)
             except OSError as exc:
                 logger.error("Could not write health heartbeat: %s", exc)
+            if self.state == "healthy":
+                try:
+                    await self.process_control_requests()
+                except Exception:
+                    logger.exception("Could not process runtime control requests.")
 
     def start(self) -> None:
         self.write(state="starting")

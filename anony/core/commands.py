@@ -50,6 +50,8 @@ SUDO_PRIVATE_COMMANDS = PUBLIC_PRIVATE_COMMANDS + [
     ("sudolist", "View owner and sudo users"),
     ("setup", "View deployment setup status"),
     ("setlog", "Configure the optional log group"),
+    ("disablelog", "Disable activity logging and warnings"),
+    ("checksetup", "Check deployment readiness"),
     ("support", "Configure the support group"),
     ("updates", "Configure the updates channel"),
     ("langcode", "Configure the default language"),
