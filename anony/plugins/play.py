@@ -9,6 +9,7 @@ from pathlib import Path
 from pyrogram import filters, types
 
 from anony import anon, app, config, db, lang, logger, queue, tg, yt
+from anony.core.calls import PlaybackRecoveryQueued
 from anony.helpers import buttons, utils
 from anony.helpers._feedback import (
     DOWNLOAD_CUSTOM,
@@ -170,6 +171,8 @@ async def play_hndlr(
 
     try:
         await anon.play_media(chat_id=m.chat.id, message=sent, media=file)
+    except PlaybackRecoveryQueued:
+        return
     except Exception:
         logger.exception("Playback start failed in chat %s", m.chat.id)
         return await sent.edit_text(

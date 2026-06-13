@@ -30,6 +30,8 @@ class HealthReporter:
             "active_voice_chats": len(db.active_calls),
             "assistants_online": len(userbot.clients),
             "playback_operations": anon.active_operations(),
+            "playback_failures": anon.playback_diagnostics(),
+            "restart_request": anon.restart_request(),
         }
 
     def write(self, *, state: str | None = None, reason: str = "", event_loop_delay: float = 0.0) -> None:

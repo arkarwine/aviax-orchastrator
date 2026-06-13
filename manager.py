@@ -187,6 +187,7 @@ class DeploymentMeta:
     pending_restart: bool = False
     restart_requested_at: Optional[str] = None
     restart_requested_by: Optional[int] = None
+    pending_restart_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -199,6 +200,7 @@ class DeploymentMeta:
         values.setdefault("desired_running", bool(values.get("pid")))
         values.setdefault("intentionally_stopped", not values["desired_running"])
         values.setdefault("restart_history", [])
+        values.setdefault("pending_restart_reason", None)
         return cls(**values)
 
     @property
@@ -1032,6 +1034,7 @@ class BotManager:
                 f"\nActive calls: <code>{health.get('active_voice_chats', 0)}</code>"
                 f"\nAssistants online: <code>{health.get('assistants_online', 0)}</code>"
                 f"\nPlayback operations: <code>{html.escape(str(health.get('playback_operations', {})))[:400]}</code>"
+                f"\nPlayback failures: <code>{html.escape(str(health.get('playback_failures', {})))[:400]}</code>"
             )
         if deployment.pid and self.process_matches(deployment):
             try:
@@ -1055,6 +1058,11 @@ class BotManager:
                 "\nRestart: <code>queued until active streams finish</code>"
                 f"\nRequested: <code>{deployment.restart_requested_at or 'unknown'}</code>"
             )
+            if deployment.pending_restart_reason:
+                text += (
+                    "\nRestart reason: "
+                    f"<code>{html.escape(deployment.pending_restart_reason)}</code>"
+                )
         await message.reply_text(text, reply_parameters=ReplyParameters(message_id=message.id))
 
     @handler_errors
@@ -1449,6 +1457,7 @@ class BotManager:
             deployment.pending_restart = True
             deployment.restart_requested_at = datetime.now(timezone.utc).isoformat()
             deployment.restart_requested_by = requested_by
+            deployment.pending_restart_reason = "requested manually"
             try:
                 self.write_restart_marker(deployment)
             except OSError:
@@ -2047,6 +2056,7 @@ class BotManager:
         deployment.pending_restart = False
         deployment.restart_requested_at = None
         deployment.restart_requested_by = None
+        deployment.pending_restart_reason = None
         try:
             self.restart_marker_path(deployment).unlink(missing_ok=True)
         except OSError:
@@ -2063,6 +2073,81 @@ class BotManager:
                 return
             self._run_pending_restart_locked(deployment)
 
+    def queue_heartbeat_restart(self, deployment: DeploymentMeta, health: Optional[dict]) -> bool:
+        if (
+            not health
+            or deployment.pending_restart
+            or deployment.intentionally_stopped
+            or not deployment.desired_running
+            or not self.process_matches(deployment)
+        ):
+            return False
+        try:
+            if time.time() - float(health.get("timestamp", 0)) > self.health_stale_after:
+                return False
+        except (TypeError, ValueError):
+            return False
+
+        request = health.get("restart_request")
+        if not isinstance(request, dict):
+            return False
+        reason = str(request.get("reason") or "deployed bot requested a safe restart")[:200]
+        requested_at = request.get("requested_at")
+        try:
+            requested = datetime.fromtimestamp(float(requested_at), timezone.utc).isoformat()
+        except (TypeError, ValueError, OSError):
+            requested = datetime.now(timezone.utc).isoformat()
+
+        deployment.pending_restart = True
+        deployment.restart_requested_at = requested
+        deployment.restart_requested_by = self.config.owner_id
+        deployment.pending_restart_reason = reason
+        deployment.last_failure = reason
+        try:
+            self.write_restart_marker(deployment)
+        except OSError:
+            self.clear_pending_restart(deployment)
+            deployment.last_failure = f"Could not queue playback recovery restart: {reason}"
+            self.store.update(deployment)
+            logger.exception("Could not create playback recovery marker for %s.", deployment.name)
+            self._notify_owner(
+                f"❌ Deployment <b>{deployment.name}</b> requested playback recovery, but its "
+                "safe-restart marker could not be created.\n\n"
+                f"💡 Review <code>/logs {deployment.name}</code> and use "
+                f"<code>/restart {deployment.name}</code>."
+            )
+            return False
+
+        self.store.update(deployment)
+        streams = self.active_stream_count(deployment)
+        waiting = (
+            "waiting for a fresh heartbeat before restarting"
+            if streams is None
+            else (
+                "restarting as soon as the watcher confirms the deployment is idle"
+                if streams == 0
+                else f"waiting for {streams} active stream{'s' if streams != 1 else ''} to finish"
+            )
+        )
+        chat_id = request.get("chat_id", "unknown")
+        assistant_slot = request.get("assistant_slot", "unknown")
+        self.audit.record(
+            "playback_recovery_restart",
+            issuer_id=self.config.owner_id,
+            deployment=deployment.name,
+            result="queued",
+            detail=f"{reason}; chat={chat_id}; assistant={assistant_slot}",
+        )
+        self._notify_owner(
+            f"⚠️ <b>Playback recovery restart queued for {deployment.name}</b>\n\n"
+            f"Reason: <code>{html.escape(reason)}</code>\n"
+            f"Affected chat: <code>{html.escape(str(chat_id))}</code>\n"
+            f"Assistant slot: <code>{html.escape(str(assistant_slot))}</code>\n\n"
+            f"🔄 The manager is {waiting}. This graceful recovery does not count against "
+            "the frozen-deployment recovery limit."
+        )
+        return True
+
     def _run_pending_restart_locked(self, deployment: DeploymentMeta) -> None:
         with self.recovery_guard:
             if (
@@ -2074,6 +2159,7 @@ class BotManager:
             self.restarting.add(deployment.name)
 
         requested_by = deployment.restart_requested_by
+        restart_reason = deployment.pending_restart_reason
         try:
             if (
                 not deployment.desired_running
@@ -2092,7 +2178,12 @@ class BotManager:
             self._notify_user(
                 requested_by,
                 f"🔄 Queued restart for deployment <b>{deployment.name}</b> is now underway.\n\n"
-                "✅ All active streams have finished. The deployment is restarting now.",
+                "✅ All active streams have finished. The deployment is restarting now."
+                + (
+                    f"\nReason: <code>{html.escape(deployment.pending_restart_reason)}</code>"
+                    if deployment.pending_restart_reason
+                    else ""
+                ),
             )
             stopped, error = self.stop_process(deployment)
             if not stopped:
@@ -2132,6 +2223,7 @@ class BotManager:
                 issuer_id=requested_by,
                 deployment=deployment.name,
                 result="success",
+                detail=restart_reason or "",
             )
         finally:
             with self.recovery_guard:
@@ -2437,6 +2529,8 @@ class BotManager:
         while not self.shutdown_event.wait(self.monitor_interval):
             for deployment in list(self.store.list().values()):
                 try:
+                    health = self.read_health(deployment)
+                    self.queue_heartbeat_restart(deployment, health)
                     if (
                         deployment.pending_restart
                         and deployment.name not in self.restarting

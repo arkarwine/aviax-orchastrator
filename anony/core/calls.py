@@ -4,9 +4,11 @@
 
 
 import asyncio
+import json
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from ntgcalls import (ConnectionNotFound, TelegramServerError,
                       RTMPStreamingUnsupported, ConnectionError)
@@ -22,13 +24,22 @@ from anony import (app, config, db, lang, logger,
 from anony.helpers import Media, Track, buttons
 
 
+class PlaybackRecoveryQueued(Exception):
+    """Playback stalled twice and a safe deployment restart was queued."""
+
+
 class TgCall(PyTgCalls):
     def __init__(self):
         self.clients = []
         self._locks = defaultdict(asyncio.Lock)
+        self._assistant_locks = defaultdict(asyncio.Lock)
         self._operations = {}
         self._last_stream_end = {}
+        self._playback_timeout_count = 0
+        self._last_playback_timeout = None
+        self._restart_request = None
         self.operation_timeout = 75
+        self.play_start_timeout = 30
 
     def active_operations(self) -> dict:
         now = time.monotonic()
@@ -39,6 +50,24 @@ class TgCall(PyTgCalls):
             }
             for chat_id, operation in self._operations.items()
         }
+
+    def playback_diagnostics(self) -> dict:
+        return {
+            "timeout_count": self._playback_timeout_count,
+            "last_timeout": self._last_playback_timeout,
+        }
+
+    def restart_request(self) -> dict | None:
+        return self._restart_request
+
+    @staticmethod
+    def _assistant_slot(client) -> int | str:
+        return getattr(client, "session_slot", "unknown")
+
+    @asynccontextmanager
+    async def _assistant_operation(self, client):
+        async with self._assistant_locks[self._assistant_slot(client)]:
+            yield
 
     @asynccontextmanager
     async def _operation(self, chat_id: int, stage: str):
@@ -63,7 +92,8 @@ class TgCall(PyTgCalls):
             client = await db.get_assistant(chat_id)
             await db.playing(chat_id, paused=True)
             try:
-                return await asyncio.wait_for(client.pause(chat_id), self.operation_timeout)
+                async with self._assistant_operation(client):
+                    return await asyncio.wait_for(client.pause(chat_id), self.operation_timeout)
             except asyncio.TimeoutError:
                 await db.playing(chat_id, paused=False)
                 logger.error("Voice call pause timed out chat=%s", chat_id)
@@ -74,7 +104,8 @@ class TgCall(PyTgCalls):
             client = await db.get_assistant(chat_id)
             await db.playing(chat_id, paused=False)
             try:
-                return await asyncio.wait_for(client.resume(chat_id), self.operation_timeout)
+                async with self._assistant_operation(client):
+                    return await asyncio.wait_for(client.resume(chat_id), self.operation_timeout)
             except asyncio.TimeoutError:
                 await db.playing(chat_id, paused=True)
                 logger.error("Voice call resume timed out chat=%s", chat_id)
@@ -95,10 +126,11 @@ class TgCall(PyTgCalls):
 
         client = await db.get_assistant(chat_id)
         try:
-            await asyncio.wait_for(
-                client.leave_call(chat_id, close=False),
-                timeout=self.operation_timeout,
-            )
+            async with self._assistant_operation(client):
+                await asyncio.wait_for(
+                    client.leave_call(chat_id, close=False),
+                    timeout=self.operation_timeout,
+                )
         except asyncio.TimeoutError:
             logger.error("Voice call leave timed out chat=%s", chat_id)
         except (ConnectionNotFound, exceptions.NoActiveGroupCall):
@@ -172,13 +204,11 @@ class TgCall(PyTgCalls):
             ffmpeg_parameters=f"-ss {seek_time}" if seek_time > 1 else None,
         )
         try:
-            await asyncio.wait_for(
-                client.play(
-                    chat_id=chat_id,
-                    stream=stream,
-                    config=types.GroupCallConfig(auto_start=False),
-                ),
-                timeout=self.operation_timeout,
+            await self._start_playback_with_recovery(
+                client=client,
+                chat_id=chat_id,
+                stream=stream,
+                message=message,
             )
             if not seek_time:
                 media.time = 1
@@ -231,15 +261,132 @@ class TgCall(PyTgCalls):
         except RTMPStreamingUnsupported:
             await self._stop(chat_id)
             await message.edit_text(_lang["error_rtmp"])
-        except asyncio.TimeoutError:
-            logger.error("Playback start timed out chat=%s", chat_id)
-            await self._stop(chat_id, leave_call=False)
+        except PlaybackRecoveryQueued:
             raise
+
+    def _record_playback_timeout(self, chat_id: int, client, retry_stage: str) -> None:
+        self._playback_timeout_count += 1
+        self._last_playback_timeout = {
+            "timestamp": time.time(),
+            "chat_id": chat_id,
+            "assistant_slot": self._assistant_slot(client),
+            "retry_stage": retry_stage,
+        }
+
+    async def _cleanup_failed_play_start(self, chat_id: int, client) -> None:
+        await db.remove_call(chat_id)
+        try:
+            async with self._assistant_operation(client):
+                await asyncio.wait_for(
+                    client.leave_call(chat_id, close=False),
+                    timeout=15,
+                )
+        except (asyncio.TimeoutError, ConnectionNotFound, exceptions.NoActiveGroupCall):
+            logger.info("Stale playback cleanup completed with no active call chat=%s", chat_id)
+        except Exception as exc:
+            logger.warning("Stale playback cleanup failed chat=%s: %s", chat_id, exc)
+
+    async def _edit_playback_feedback(self, message: Message, text: str) -> None:
+        try:
+            await message.edit_text(text)
+        except Exception as exc:
+            logger.warning("Could not update playback recovery feedback: %s", exc)
+
+    async def _request_safe_restart(self, chat_id: int, client) -> None:
+        request = {
+            "requested_at": time.time(),
+            "reason": "playback start timed out twice",
+            "chat_id": chat_id,
+            "assistant_slot": self._assistant_slot(client),
+            "retry_stage": "retry_failed",
+        }
+        self._restart_request = request
+        try:
+            from anony.core.health import health
+
+            health.write()
+        except OSError as exc:
+            logger.warning("Could not immediately publish playback recovery heartbeat: %s", exc)
+        marker = Path.cwd() / ".restart-when-idle"
+        temporary = marker.with_suffix(".tmp")
+        try:
+            temporary.write_text(json.dumps(request, ensure_ascii=True), encoding="ascii")
+            temporary.replace(marker)
+        except OSError as exc:
+            logger.error("Could not create playback recovery restart marker: %s", exc)
+        if app.owner:
+            try:
+                await app.send_message(
+                    app.owner,
+                    "🚨 <b>Playback recovery restart queued</b>\n\n"
+                    f"Playback stalled twice in chat <code>{chat_id}</code> using assistant "
+                    f"slot <code>{self._assistant_slot(client)}</code>.\n\n"
+                    "📥 The affected queue was preserved. New playback requests are paused, "
+                    "and the deployment will restart after other active streams finish.",
+                )
+            except Exception as exc:
+                logger.warning("Could not notify owner about playback recovery: %s", exc)
+
+    async def _start_playback_with_recovery(
+        self,
+        *,
+        client,
+        chat_id: int,
+        stream,
+        message: Message,
+    ) -> None:
+        for attempt in (1, 2):
+            try:
+                async with self._assistant_operation(client):
+                    await asyncio.wait_for(
+                        client.play(
+                            chat_id=chat_id,
+                            stream=stream,
+                            config=types.GroupCallConfig(auto_start=False),
+                        ),
+                        timeout=self.play_start_timeout,
+                    )
+                return
+            except asyncio.TimeoutError:
+                stage = "retrying" if attempt == 1 else "retry_failed"
+                self._record_playback_timeout(chat_id, client, stage)
+                if attempt == 1:
+                    logger.warning(
+                        "Playback start timed out chat=%s assistant=%s; retrying once",
+                        chat_id,
+                        self._assistant_slot(client),
+                    )
+                    await self._edit_playback_feedback(
+                        message,
+                        "⚠️ <b>Playback connection stalled.</b>\n\n"
+                        "🔄 I am cleaning up this voice-chat connection and retrying the same track once.",
+                    )
+                    await self._cleanup_failed_play_start(chat_id, client)
+                    await asyncio.sleep(2)
+                    continue
+
+                logger.exception(
+                    "Playback start timed out again chat=%s assistant=%s; safe restart queued",
+                    chat_id,
+                    self._assistant_slot(client),
+                )
+                await self._request_safe_restart(chat_id, client)
+                await self._edit_playback_feedback(
+                    message,
+                    "🚨 <b>Playback could not reconnect after retrying.</b>\n\n"
+                    "📥 Your queue has been preserved.\n"
+                    "⏸️ New playback requests are temporarily paused.\n"
+                    "🔄 A safe restart is queued and will begin after other active streams finish.",
+                )
+                raise PlaybackRecoveryQueued from None
 
 
     async def replay(self, chat_id: int) -> None:
         async with self._operation(chat_id, "replay"):
-            await self._replay(chat_id)
+            try:
+                await self._replay(chat_id)
+            except PlaybackRecoveryQueued:
+                return
 
     async def _replay(self, chat_id: int) -> None:
         if not await db.get_call(chat_id):
@@ -256,7 +403,10 @@ class TgCall(PyTgCalls):
 
     async def play_next(self, chat_id: int) -> None:
         async with self._operation(chat_id, "next"):
-            await self._play_next(chat_id)
+            try:
+                await self._play_next(chat_id)
+            except PlaybackRecoveryQueued:
+                return
 
     async def _play_next(self, chat_id: int) -> None:
         if loop := await db.get_loop(chat_id):
