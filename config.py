@@ -100,6 +100,7 @@ class Config:
             "COOKIES_URL": self.COOKIES_URL,
             "DOWNLOADS_PATH": self.DOWNLOADS_PATH,
             "LOGGING_DISABLED": self.LOGGING_DISABLED,
+            "DURATION_LIMIT": self.DURATION_LIMIT,
         }
         del self._values
 

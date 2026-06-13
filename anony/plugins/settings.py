@@ -26,6 +26,7 @@ VALID_KEYS = [
     "PING_IMG",
     "START_IMG",
     "OWNER_LINK",
+    "DURATION_LIMIT",
 ]
 BOOL_KEYS = {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY"}
 RESTART_REQUIRED_KEYS = {
@@ -425,6 +426,7 @@ async def _settings(_, m: types.Message):
             "• auto_end (true/false)\n"
             "• thumb_gen (true/false)\n"
             "• video_play (true/false)\n"
+            "• duration_limit (minutes, 1-10080)\n"
             "• lang_code (e.g. en, fr, de)\n"
             "• default_thumb (image URL)\n"
             "• ping_img (image URL)\n"
@@ -434,6 +436,7 @@ async def _settings(_, m: types.Message):
             "Use <code>/config &lt;key&gt;</code> to view the current value.\n\n"
             "Examples:\n"
             "<code>/config auto_leave true</code>\n"
+            "<code>/config duration_limit 120</code>\n"
             "<code>/config lang_code en</code>\n"
             "<code>/config default_thumb https://example.com/thumb.jpg</code>\n"
             "<code>/config ping_img https://example.com/ping.jpg</code>\n"
@@ -453,14 +456,17 @@ async def _settings(_, m: types.Message):
         )
     if key not in VALID_KEYS:
         return await m.reply_text(
-            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, lang_code, default_thumb, ping_img, start_img, owner_link"
+            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, duration_limit, lang_code, default_thumb, ping_img, start_img, owner_link"
         )
 
     if len(m.command) == 2:
         stored_value = runtime.get(key)
         current_value = stored_value if stored_value is not None else getattr(config, key, None)
+        if key == "DURATION_LIMIT":
+            current_value = int(current_value) // 60
         await m.reply_text(
             f"<b>{key}</b> = <code>{short(str(current_value))}</code>\n"
+            f"{'(minutes) ' if key == 'DURATION_LIMIT' else ''}"
             f"({'override' if stored_value is not None else 'default'})"
         )
         return
@@ -482,12 +488,27 @@ async def _settings(_, m: types.Message):
             )
         value = value.lower() in ("true", "on", "yes", "1")
 
+    display_value = value
+    if key == "DURATION_LIMIT":
+        if not value.isdigit() or not 1 <= int(value) <= 10080:
+            return await m.reply_text(
+                "❌ Stream time limit must be between 1 and 10080 minutes.\n\n"
+                "💡 Example: <code>/config duration_limit 120</code>"
+            )
+        display_value = f"{int(value)} minutes"
+        value = int(value) * 60
+
     await db.set_config(key, value)
     config.apply_runtime_config({key: value})
 
     await m.reply_text(
         f"✅ Updated <code>{key}</code>.\n"
-        f"Current value: <code>{short(str(value))}</code>"
+        f"Current value: <code>{short(str(display_value))}</code>\n\n"
+        + (
+            "⚡ The new limit applies immediately to new playback requests."
+            if key == "DURATION_LIMIT"
+            else ""
+        )
     )
 
 
@@ -515,11 +536,15 @@ async def _get_setting(_, m: types.Message):
         default = getattr(config, key, None)
         if default is None:
             return await m.reply_text(f"❌ Setting <code>{key}</code> not found")
+        if key == "DURATION_LIMIT":
+            default = f"{int(default) // 60} minutes"
         return await m.reply_text(f"<code>{key}</code> = <code>{default}</code>\n(default)")
     
     # Mask sensitive values
     if key == "API_KEY":
         value = "***"
+    elif key == "DURATION_LIMIT":
+        value = f"{int(value) // 60} minutes"
     
     await m.reply_text(f"<code>{key}</code> = <code>{value}</code>\n(override)")
 
@@ -545,11 +570,12 @@ async def _reset_setting(_, m: types.Message):
     valid_keys = {
         "AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY",
         "LANG_CODE", "DEFAULT_THUMB", "PING_IMG", "START_IMG", "OWNER_LINK",
+        "DURATION_LIMIT",
     }
     
     if key not in valid_keys:
         return await m.reply_text(
-            "❌ Invalid setting key. Available keys: auto_leave, auto_end, thumb_gen, video_play, lang_code, default_thumb, ping_img, start_img, owner_link"
+            "❌ Invalid setting key. Available keys: auto_leave, auto_end, thumb_gen, video_play, duration_limit, lang_code, default_thumb, ping_img, start_img, owner_link"
         )
     
     original_value = config._runtime_defaults.get(key)
@@ -560,4 +586,9 @@ async def _reset_setting(_, m: types.Message):
     # Update the live config
     config.apply_runtime_config({key: original_value})
     
-    await m.reply_text(f"✅ Setting <code>{key}</code> reset to default.\nValue: <code>{original_value}</code>")
+    display_value = (
+        f"{int(original_value) // 60} minutes"
+        if key == "DURATION_LIMIT"
+        else original_value
+    )
+    await m.reply_text(f"✅ Setting <code>{key}</code> reset to default.\nValue: <code>{display_value}</code>")
