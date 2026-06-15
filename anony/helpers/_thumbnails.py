@@ -52,55 +52,83 @@ class Thumbnail:
             target.append(word)
         return cls.shorten(" ".join(first), 23), cls.shorten(" ".join(second), 23)
 
-    async def generate(self, song: Track, size=(1280, 720)) -> str:
+    async def generate(self, song: Track, size=(960, 540)) -> str:
         try:
             cache_dir = Path.cwd() / "cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
             temp = cache_dir / f"temp_{song.id}.jpg"
-            output = cache_dir / f"{song.id}_nowplaying_v2.png"
+            output = cache_dir / f"{song.id}_nowplaying_v3.gif"
             if output.exists():
                 return str(output)
 
             await self.save_thumb(str(temp), song.thumbnail)
             source = Image.open(temp).convert("RGB")
             backdrop = ImageOps.fit(source, size, method=Image.Resampling.LANCZOS)
-            backdrop = backdrop.filter(ImageFilter.GaussianBlur(42))
-            backdrop = ImageEnhance.Brightness(backdrop).enhance(0.22).convert("RGBA")
+            backdrop = backdrop.filter(ImageFilter.GaussianBlur(32))
+            backdrop = ImageEnhance.Brightness(backdrop).enhance(0.48).convert("RGBA")
 
-            overlay = Image.new("RGBA", size, (10, 14, 24, 185))
-            image = Image.alpha_composite(backdrop, overlay)
-            draw = ImageDraw.Draw(image)
+            overlay = Image.new("RGBA", size, (8, 12, 22, 105))
+            base = Image.alpha_composite(backdrop, overlay)
+            draw = ImageDraw.Draw(base)
 
-            art_size = (500, 500)
+            art_size = (380, 380)
             art = ImageOps.fit(source, art_size, method=Image.Resampling.LANCZOS).convert("RGBA")
             mask = Image.new("L", art_size, 0)
-            ImageDraw.Draw(mask).rounded_rectangle((0, 0, *art_size), radius=28, fill=255)
+            ImageDraw.Draw(mask).rounded_rectangle((0, 0, *art_size), radius=24, fill=255)
             art.putalpha(mask)
-            draw.rounded_rectangle((54, 106, 570, 622), radius=34, fill=(0, 0, 0, 95))
-            image.paste(art, (62, 98), art)
+            base.paste(art, (54, 80), art)
 
-            draw.rounded_rectangle((620, 100, 1215, 620), radius=28, fill=(14, 20, 32, 225))
-            draw.rounded_rectangle((660, 140, 865, 184), radius=22, fill=(27, 194, 125, 255))
-            draw.text((687, 149), "NOW PLAYING", font=self.badge_font, fill=(5, 30, 22, 255))
+            draw.rounded_rectangle((468, 80, 912, 460), radius=25, fill=(9, 15, 27, 178))
+            draw.rounded_rectangle((500, 108, 690, 150), radius=21, fill=(242, 193, 78, 245))
+            draw.text((523, 116), "NOW PLAYING", font=self.badge_font, fill=(35, 27, 8, 255))
 
             title_one, title_two = self.title_lines(song.title)
             channel = self.shorten(song.channel_name, 28)
             views = self.shorten(song.view_count, 18)
-            draw.text((660, 222), title_one, font=self.title_font, fill=(250, 252, 255, 255))
+            draw.text((500, 182), title_one, font=self.title_font, fill=(250, 252, 255, 255))
             if title_two:
-                draw.text((660, 278), title_two, font=self.title_font, fill=(250, 252, 255, 255))
-            draw.text((660, 354), channel, font=self.meta_font, fill=(129, 211, 255, 255))
-            draw.text((660, 394), f"{views} views", font=self.meta_font, fill=(178, 187, 204, 255))
+                draw.text((500, 236), title_two, font=self.title_font, fill=(250, 252, 255, 255))
+            draw.text((500, 308), channel, font=self.meta_font, fill=(139, 218, 255, 255))
+            draw.text((500, 344), f"{views} views  •  {song.duration}", font=self.meta_font, fill=(205, 212, 224, 255))
+            draw.text(
+                (500, 407),
+                self.shorten(config.NAME, 28),
+                font=self.badge_font,
+                fill=(255, 215, 116, 255),
+            )
 
-            draw.rounded_rectangle((660, 472, 1165, 480), radius=4, fill=(76, 88, 108, 255))
-            draw.rounded_rectangle((660, 472, 715, 480), radius=4, fill=(38, 211, 142, 255))
-            draw.ellipse((704, 463, 722, 489), fill=(245, 249, 255, 255))
-            draw.text((660, 504), "0:01", font=self.time_font, fill=(213, 220, 232, 255))
-            duration_width = draw.textbbox((0, 0), song.duration, font=self.time_font)[2]
-            draw.text((1165 - duration_width, 504), song.duration, font=self.time_font, fill=(213, 220, 232, 255))
-            draw.text((660, 562), "AVIAX  •  MUSIC", font=self.badge_font, fill=(255, 203, 92, 255))
+            patterns = (
+                (18, 34, 22, 46, 28, 38, 16),
+                (30, 18, 42, 24, 48, 20, 34),
+                (22, 45, 28, 38, 18, 46, 26),
+                (42, 25, 18, 48, 30, 22, 40),
+                (26, 38, 46, 20, 34, 44, 18),
+                (18, 28, 36, 48, 22, 32, 44),
+                (38, 44, 20, 30, 46, 26, 18),
+                (28, 20, 48, 34, 24, 42, 30),
+            )
+            frames = []
+            for heights in patterns:
+                frame = base.copy()
+                frame_draw = ImageDraw.Draw(frame)
+                for index, height in enumerate(heights):
+                    left = 770 + index * 17
+                    frame_draw.rounded_rectangle(
+                        (left, 426 - height, left + 9, 426),
+                        radius=4,
+                        fill=(255, 218, 123, 245),
+                    )
+                frames.append(frame.convert("P", palette=Image.Palette.ADAPTIVE, colors=128))
 
-            image.save(output)
+            frames[0].save(
+                output,
+                save_all=True,
+                append_images=frames[1:],
+                duration=140,
+                loop=0,
+                optimize=True,
+                disposal=2,
+            )
             try:
                 temp.unlink(missing_ok=True)
             except Exception:

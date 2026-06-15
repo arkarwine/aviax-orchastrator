@@ -15,7 +15,7 @@ from ntgcalls import (ConnectionNotFound, TelegramServerError,
 from pyrogram import raw
 from pyrogram.errors import (ChatSendMediaForbidden, ChatSendPhotosForbidden,
                              MessageIdInvalid)
-from pyrogram.types import InputMediaPhoto, Message
+from pyrogram.types import InputMediaAnimation, InputMediaPhoto, Message
 from pytgcalls import PyTgCalls, exceptions, types
 from pytgcalls.pytgcalls_session import PyTgCallsSession
 
@@ -236,23 +236,33 @@ class TgCall(PyTgCalls):
                 keyboard = buttons.controls(chat_id)
                 try:
                     if _thumb:
+                        input_media = (
+                            InputMediaAnimation(media=_thumb, caption=text)
+                            if str(_thumb).lower().endswith(".gif")
+                            else InputMediaPhoto(media=_thumb, caption=text)
+                        )
                         await message.edit_media(
-                            media=InputMediaPhoto(
-                                media=_thumb,
-                                caption=text,
-                            ),
+                            media=input_media,
                             reply_markup=keyboard,
                         )
                     else:
                         await message.edit_text(text, reply_markup=keyboard)
                 except (ChatSendMediaForbidden, ChatSendPhotosForbidden, MessageIdInvalid):
                     if _thumb:
-                        sent = await app.send_photo(
-                            chat_id=chat_id,
-                            photo=_thumb,
-                            caption=text,
-                            reply_markup=keyboard,
-                        )
+                        if str(_thumb).lower().endswith(".gif"):
+                            sent = await app.send_animation(
+                                chat_id=chat_id,
+                                animation=_thumb,
+                                caption=text,
+                                reply_markup=keyboard,
+                            )
+                        else:
+                            sent = await app.send_photo(
+                                chat_id=chat_id,
+                                photo=_thumb,
+                                caption=text,
+                                reply_markup=keyboard,
+                            )
                     else:
                         sent = await app.send_message(
                             chat_id=chat_id,
