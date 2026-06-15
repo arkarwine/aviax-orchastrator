@@ -190,6 +190,7 @@ class DeploymentMeta:
     restart_requested_at: Optional[str] = None
     restart_requested_by: Optional[int] = None
     pending_restart_reason: Optional[str] = None
+    pending_restart_mode: str = "drain"
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -203,6 +204,7 @@ class DeploymentMeta:
         values.setdefault("intentionally_stopped", not values["desired_running"])
         values.setdefault("restart_history", [])
         values.setdefault("pending_restart_reason", None)
+        values.setdefault("pending_restart_mode", "drain")
         return cls(**values)
 
     @property
@@ -494,7 +496,7 @@ class BotManager:
             "▶️ /deploy &lt;name&gt; - Start a stopped deployment.\n"
             "⏹️ /stop &lt;name&gt; - Stop a running deployment.\n"
             "🗑️ /delete &lt;name&gt; - Permanently delete a deployment.\n"
-            "🛠️ /restart &lt;name|all&gt; [force] - Queue a stream-draining maintenance restart, or force emergency maintenance.\n"
+            "🛠️ /restart &lt;name|all&gt; [idle|force] - Restart after complete natural idleness, drain streams for maintenance, or force immediately.\n"
             "✖️ /cancelrestart &lt;name|all&gt; - Cancel queued maintenance restarts.\n"
             "📄 /logs &lt;name&gt; - Retrieve a deployment's full log.\n"
             "👥 /sudolist - View manager owner and sudo users.\n"
@@ -1076,7 +1078,15 @@ class BotManager:
         for name, deployment in self.store.list().items():
             state, health, _ = self.deployment_health(deployment)
             status = self.format_health_state(state)
-            pending = " — <code>🛠️ maintenance restart queued</code>" if deployment.pending_restart else ""
+            pending = (
+                " — <code>💤 passive idle restart queued</code>"
+                if deployment.pending_restart and deployment.pending_restart_mode == "idle"
+                else (
+                    " — <code>🛠️ maintenance restart queued</code>"
+                    if deployment.pending_restart
+                    else ""
+                )
+            )
             streams = int((health or {}).get("active_voice_chats", 0) or 0)
             stream_text = f" — <code>🎵 {streams}</code>" if streams else ""
             operation = self.operations.current(name)
@@ -1125,6 +1135,9 @@ class BotManager:
                 f"\nPlayback operations: <code>{html.escape(str(health.get('playback_operations', {})))[:400]}</code>"
                 f"\nPlayback failures: <code>{html.escape(str(health.get('playback_failures', {})))[:400]}</code>"
                 f"\nSaved maintenance requests: <code>{health.get('maintenance_queued_requests', 0)}</code>"
+                f"\nLive queue items: <code>{health.get('live_queued_requests', 0)}</code>"
+                f"\nPreparing play requests: <code>{health.get('active_play_requests', 0)}</code>"
+                f"\nBroadcast active: <code>{'yes' if health.get('broadcast_active') else 'no'}</code>"
                 f"\nMaintenance grace remaining: <code>{health.get('maintenance_grace_remaining', 'not pending')}</code>"
             )
         if deployment.pid and self.process_matches(deployment):
@@ -1146,7 +1159,13 @@ class BotManager:
             text += f"\nLast failure: <code>{html.escape(deployment.last_failure)}</code>"
         if deployment.pending_restart:
             text += (
-                "\nRestart: <code>maintenance restart queued until active streams finish</code>"
+                "\nRestart: <code>"
+                + (
+                    "passively waiting for complete natural idleness; playback remains unrestricted"
+                    if deployment.pending_restart_mode == "idle"
+                    else "maintenance restart queued until active streams finish"
+                )
+                + "</code>"
                 f"\nRequested: <code>{deployment.restart_requested_at or 'unknown'}</code>"
             )
             if deployment.pending_restart_reason:
@@ -1342,20 +1361,23 @@ class BotManager:
         args = message.text.split(maxsplit=2)
         if len(args) < 2:
             return await message.reply_text(
-                "🔄 Usage: <code>/restart &lt;name|all&gt; [force]</code>\n\n"
+                "🔄 Usage: <code>/restart &lt;name|all&gt; [idle|force]</code>\n\n"
                 "💡 Use <code>/list</code> to check registered deployment names.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
-        force = len(args) > 2 and args[2].strip().lower() == "force"
-        if len(args) > 2 and not force:
+        option = args[2].strip().lower() if len(args) > 2 else ""
+        force = option == "force"
+        idle = option == "idle"
+        if option and not force and not idle:
             return await message.reply_text(
                 "❌ Unknown restart option.\n\n"
-                "💡 Use <code>force</code> only when you need an immediate emergency restart.",
+                "💡 Use <code>idle</code> for a passive unrestricted restart, or "
+                "<code>force</code> only for immediate emergency maintenance.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
         if args[1].strip().lower() == "all":
-            return await self.restart_all(message, force=force)
+            return await self.restart_all(message, force=force, idle=idle)
 
         name = normalize_name(args[1])
         deployment = self.store.get(name)
@@ -1367,7 +1389,11 @@ class BotManager:
             )
 
         status = await message.reply_text(
-            f"🔎 Checking active streams for deployment <b>{name}</b>...",
+            (
+                f"🔎 Checking whether deployment <b>{name}</b> is completely idle..."
+                if idle
+                else f"🔎 Checking active streams for deployment <b>{name}</b>..."
+            ),
             reply_parameters=ReplyParameters(message_id=message.id),
         )
         result, detail = await self.request_restart(
@@ -1375,8 +1401,18 @@ class BotManager:
             message.from_user.id,
             status,
             force=force,
+            idle=idle,
         )
         if result == "waiting":
+            if idle:
+                return await status.edit_text(
+                    f"💤 Passive restart queued for deployment <b>{name}</b>.\n\n"
+                    f"{detail}\n\n"
+                    "▶️ Playback and queueing remain fully available.\n"
+                    "🕰️ The restart will happen only when there are no streams, queues, "
+                    "saved requests, or playback operations.\n"
+                    f"✖️ Use <code>/cancelrestart {name}</code> to cancel it."
+                )
             return await status.edit_text(
                 f"🛠️ Maintenance restart for deployment <b>{name}</b> is waiting.\n\n"
                 f"🎵 {detail}\n"
@@ -1441,7 +1477,13 @@ class BotManager:
             text += "\n\n⏳ Could not cancel while busy: <code>" + ", ".join(busy) + "</code>"
         await message.reply_text(text, reply_parameters=ReplyParameters(message_id=message.id))
 
-    async def restart_all(self, message: Message, *, force: bool = False) -> None:
+    async def restart_all(
+        self,
+        message: Message,
+        *,
+        force: bool = False,
+        idle: bool = False,
+    ) -> None:
         deployments = list(self.store.list().values())
         if not deployments:
             return await message.reply_text(
@@ -1450,7 +1492,11 @@ class BotManager:
             )
 
         status = await message.reply_text(
-            "🔎 Checking all deployments for active streams...",
+            (
+                "🔎 Checking all deployments for complete natural idleness..."
+                if idle
+                else "🔎 Checking all deployments for active streams..."
+            ),
             reply_parameters=ReplyParameters(message_id=message.id),
         )
         lines = ["<b>🔄 Restart All</b>"]
@@ -1471,6 +1517,7 @@ class BotManager:
                 status,
                 bulk=True,
                 force=force,
+                idle=idle,
             )
             if result in counts:
                 counts[result] += 1
@@ -1488,11 +1535,15 @@ class BotManager:
             [
                 "",
                 f"✅ Restarted immediately: <code>{counts['restarted']}</code>",
-                f"⏳ Waiting for streams: <code>{counts['waiting']}</code>",
+                f"⏳ Waiting: <code>{counts['waiting']}</code>",
                 f"⚫ Skipped: <code>{counts['skipped']}</code>",
                 f"❌ Failed: <code>{counts['failed']}</code>",
                 "",
-                "🔔 You will be notified when each waiting maintenance restart begins and completes.",
+                (
+                    "💤 Passive restarts do not restrict new playback and may wait indefinitely."
+                    if idle
+                    else "🔔 You will be notified when each waiting maintenance restart begins and completes."
+                ),
             ]
         )
         await status.edit_text("\n".join(lines))
@@ -1505,6 +1556,7 @@ class BotManager:
         *,
         bulk: bool = False,
         force: bool = False,
+        idle: bool = False,
     ) -> tuple[str, str]:
         name = deployment.name
         if name in self.recovering:
@@ -1518,7 +1570,7 @@ class BotManager:
                 "restart is already underway",
             )
 
-        operation = "force restart" if force else "restart"
+        operation = "force restart" if force else ("passive idle restart" if idle else "restart")
         with self.operations.acquire(name, operation, token=object()) as acquired:
             if not acquired:
                 return "skipped", f"{self.operations.current(name)} is already in progress"
@@ -1528,6 +1580,7 @@ class BotManager:
                 status,
                 bulk=bulk,
                 force=force,
+                idle=idle,
             )
 
     async def _request_restart_locked(
@@ -1538,39 +1591,50 @@ class BotManager:
         *,
         bulk: bool = False,
         force: bool = False,
+        idle: bool = False,
     ) -> tuple[str, str]:
         name = deployment.name
         self.audit.record(
             "restart",
             issuer_id=requested_by,
             deployment=name,
-            detail="force" if force else "safe",
+            detail="force" if force else ("idle" if idle else "safe"),
         )
         if deployment.is_running and not force:
             deployment.pending_restart = True
             deployment.restart_requested_at = datetime.now(timezone.utc).isoformat()
             deployment.restart_requested_by = requested_by
-            deployment.pending_restart_reason = "scheduled maintenance requested manually"
-            try:
-                self.write_restart_marker(deployment)
-            except OSError:
-                self.clear_pending_restart(deployment)
-                self.store.update(deployment)
-                logger.exception("Could not create restart marker for deployment %s", name)
-                return (
-                    "failed",
-                    "could not safely prepare the deployment for restart; check directory permissions",
-                )
-            self.store.update(deployment)
-            stream_count = self.active_stream_count(deployment)
-            if stream_count is None or stream_count > 0:
-                if stream_count is None:
-                    detail = "waiting for a fresh heartbeat to confirm that no streams are active"
-                else:
-                    detail = (
-                        f"waiting for <code>{stream_count}</code> active stream"
-                        f"{'s' if stream_count != 1 else ''} to finish"
+            deployment.pending_restart_mode = "idle" if idle else "drain"
+            deployment.pending_restart_reason = (
+                "passive restart requested for the next completely idle moment"
+                if idle
+                else "scheduled maintenance requested manually"
+            )
+            if idle:
+                try:
+                    self.restart_marker_path(deployment).unlink(missing_ok=True)
+                except OSError:
+                    logger.exception("Could not remove maintenance marker for passive restart %s", name)
+                    self.clear_pending_restart(deployment)
+                    self.store.update(deployment)
+                    return (
+                        "failed",
+                        "could not switch to passive restart mode; check directory permissions",
                     )
+            else:
+                try:
+                    self.write_restart_marker(deployment)
+                except OSError:
+                    self.clear_pending_restart(deployment)
+                    self.store.update(deployment)
+                    logger.exception("Could not create restart marker for deployment %s", name)
+                    return (
+                        "failed",
+                        "could not safely prepare the deployment for restart; check directory permissions",
+                    )
+            self.store.update(deployment)
+            ready, detail = self.restart_ready(deployment)
+            if not ready:
                 return (
                     "waiting",
                     detail,
@@ -1580,7 +1644,12 @@ class BotManager:
             (
                 f"🚨 Force restarting deployment <b>{name}</b> immediately for emergency maintenance..."
                 if force
-                else f"⚡ Deployment <b>{name}</b> has no active streams.\n\n🛠️ Restarting immediately for maintenance..."
+                else (
+                    f"💤 Deployment <b>{name}</b> is completely idle.\n\n"
+                    "🔄 Starting the passive restart now..."
+                    if idle
+                    else f"⚡ Deployment <b>{name}</b> has no active streams.\n\n🛠️ Restarting immediately for maintenance..."
+                )
             )
         )
         if deployment.is_running:
@@ -2138,6 +2207,53 @@ class BotManager:
         except (TypeError, ValueError):
             return None
 
+    def restart_ready(self, deployment: DeploymentMeta) -> tuple[bool, str]:
+        health = self.read_health(deployment)
+        if not health:
+            return False, "waiting for a fresh heartbeat"
+        try:
+            if time.time() - float(health.get("timestamp", 0)) > self.health_stale_after:
+                return False, "waiting for a fresh heartbeat"
+            streams = max(0, int(health.get("active_voice_chats", 0)))
+        except (TypeError, ValueError):
+            return False, "waiting for valid workload information"
+
+        if deployment.pending_restart_mode != "idle":
+            if streams:
+                return (
+                    False,
+                    f"waiting for <code>{streams}</code> active stream"
+                    f"{'s' if streams != 1 else ''} to finish",
+                )
+            return True, "no active streams remain"
+
+        if deployment.pending_restart_mode == "idle" and "live_queued_requests" not in health:
+            return False, "waiting for the deployed bot to report complete queue activity"
+        try:
+            live_queue = max(0, int(health.get("live_queued_requests", 0)))
+            deferred = max(0, int(health.get("maintenance_queued_requests", 0)))
+            play_requests = max(0, int(health.get("active_play_requests", 0)))
+        except (TypeError, ValueError):
+            return False, "waiting for valid queue information"
+        operations = health.get("playback_operations") or {}
+        operation_count = len(operations) if isinstance(operations, dict) else int(bool(operations))
+        blockers = []
+        if streams:
+            blockers.append(f"{streams} active stream{'s' if streams != 1 else ''}")
+        if live_queue:
+            blockers.append(f"{live_queue} live queue item{'s' if live_queue != 1 else ''}")
+        if deferred:
+            blockers.append(f"{deferred} saved request{'s' if deferred != 1 else ''}")
+        if operation_count:
+            blockers.append(f"{operation_count} playback operation{'s' if operation_count != 1 else ''}")
+        if play_requests:
+            blockers.append(f"{play_requests} play request{'s' if play_requests != 1 else ''} being prepared")
+        if health.get("broadcast_active"):
+            blockers.append("an active broadcast")
+        if blockers:
+            return False, "currently busy with " + ", ".join(blockers)
+        return True, "the deployment is completely idle"
+
     @staticmethod
     def restart_marker_path(deployment: DeploymentMeta) -> Path:
         return deployment.deployment_path / ".restart-when-idle"
@@ -2156,6 +2272,7 @@ class BotManager:
         deployment.restart_requested_at = None
         deployment.restart_requested_by = None
         deployment.pending_restart_reason = None
+        deployment.pending_restart_mode = "drain"
         try:
             self.restart_marker_path(deployment).unlink(missing_ok=True)
         except OSError:
@@ -2201,6 +2318,7 @@ class BotManager:
         deployment.restart_requested_at = requested
         deployment.restart_requested_by = self.config.owner_id
         deployment.pending_restart_reason = reason
+        deployment.pending_restart_mode = "drain"
         deployment.last_failure = reason
         try:
             self.write_restart_marker(deployment)
@@ -2269,16 +2387,25 @@ class BotManager:
                 self.store.update(deployment)
                 return
 
-            streams = self.active_stream_count(deployment)
-            if streams is None or streams > 0:
+            ready, _ = self.restart_ready(deployment)
+            if not ready:
                 return
 
-            logger.info("Running queued idle restart for deployment %s.", deployment.name)
+            passive = deployment.pending_restart_mode == "idle"
+            logger.info("Running queued %s restart for deployment %s.", "passive idle" if passive else "maintenance", deployment.name)
             self._notify_user(
                 requested_by,
-                f"🛠️ Maintenance restart for deployment <b>{deployment.name}</b> is now underway.\n\n"
-                "✅ All active streams have finished. Saved maintenance requests will resume "
-                "after the deployment starts again."
+                (
+                    f"💤 Passive restart for deployment <b>{deployment.name}</b> is now underway.\n\n"
+                    "✅ The deployment naturally reached a completely idle moment. No playback "
+                    "or queue requests were blocked while it waited."
+                    if passive
+                    else (
+                        f"🛠️ Maintenance restart for deployment <b>{deployment.name}</b> is now underway.\n\n"
+                        "✅ All active streams have finished. Saved maintenance requests will resume "
+                        "after the deployment starts again."
+                    )
+                )
                 + (
                     f"\nReason: <code>{html.escape(deployment.pending_restart_reason)}</code>"
                     if deployment.pending_restart_reason
@@ -2315,7 +2442,8 @@ class BotManager:
             self.store.update(deployment)
             self._notify_user(
                 requested_by,
-                f"✅ Deployment <b>{deployment.name}</b> completed its maintenance restart after all active streams finished.\n"
+                f"✅ Deployment <b>{deployment.name}</b> completed its "
+                f"{'passive idle' if passive else 'maintenance'} restart.\n"
                 f"PID: <code>{deployment.pid}</code>",
             )
             self.audit.record(
@@ -2654,7 +2782,7 @@ class BotManager:
                         and deployment.name not in self.restarting
                         and deployment.name not in self.recovering
                         and self.process_matches(deployment)
-                        and self.active_stream_count(deployment) == 0
+                        and self.restart_ready(deployment)[0]
                     ):
                         threading.Thread(
                             target=self.run_pending_restart,
@@ -2664,13 +2792,22 @@ class BotManager:
                         ).start()
                         continue
                     if deployment.pending_restart:
-                        try:
-                            self.write_restart_marker(deployment)
-                        except OSError:
-                            logger.warning(
-                                "Could not restore restart marker for deployment %s.",
-                                deployment.name,
-                            )
+                        if deployment.pending_restart_mode == "idle":
+                            try:
+                                self.restart_marker_path(deployment).unlink(missing_ok=True)
+                            except OSError:
+                                logger.warning(
+                                    "Could not remove maintenance marker for passive restart %s.",
+                                    deployment.name,
+                                )
+                        else:
+                            try:
+                                self.write_restart_marker(deployment)
+                            except OSError:
+                                logger.warning(
+                                    "Could not restore restart marker for deployment %s.",
+                                    deployment.name,
+                                )
                     else:
                         try:
                             self.restart_marker_path(deployment).unlink(missing_ok=True)

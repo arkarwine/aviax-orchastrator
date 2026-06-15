@@ -176,6 +176,9 @@ class Queue:
     def deferred_count(self) -> int:
         return sum(len(items) for items in self.deferred.values())
 
+    def live_count(self) -> int:
+        return sum(len(items) for items in self.queues.values())
+
     def deferred_position(self, chat_id: int, maintenance_id: str) -> int:
         return next(
             (

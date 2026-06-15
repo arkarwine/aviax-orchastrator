@@ -4,6 +4,7 @@
 
 
 import asyncio
+from functools import wraps
 from html import escape
 from pathlib import Path
 from uuid import uuid4
@@ -20,6 +21,21 @@ from anony.helpers._feedback import (
     reply_status,
 )
 from anony.helpers._play import checkUB
+
+active_play_requests = 0
+
+
+def track_play_request(handler):
+    @wraps(handler)
+    async def wrapper(*args, **kwargs):
+        global active_play_requests
+        active_play_requests += 1
+        try:
+            return await handler(*args, **kwargs)
+        finally:
+            active_play_requests = max(0, active_play_requests - 1)
+
+    return wrapper
 
 
 def playlist_to_queue(chat_id: int, tracks: list) -> str:
@@ -65,6 +81,7 @@ async def send_play_log_safely(
 )
 @lang.language()
 @checkUB
+@track_play_request
 async def play_hndlr(
     _,
     m: types.Message,

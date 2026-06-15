@@ -19,6 +19,8 @@ class HealthReporter:
 
     def snapshot(self, event_loop_delay: float = 0.0) -> dict:
         from anony import anon, config, db, queue, userbot
+        from anony.plugins.broadcast import broadcast_active
+        from anony.plugins.play import active_play_requests
 
         return {
             "state": self.state,
@@ -32,7 +34,10 @@ class HealthReporter:
             "playback_operations": anon.active_operations(),
             "playback_failures": anon.playback_diagnostics(),
             "restart_request": anon.restart_request(),
+            "live_queued_requests": queue.live_count(),
             "maintenance_queued_requests": queue.deferred_count(),
+            "active_play_requests": active_play_requests,
+            "broadcast_active": broadcast_active(),
             "maintenance_grace_remaining": anon.maintenance_grace_remaining(),
             "maintenance_grace_minutes": config.MAINTENANCE_GRACE_MINUTES,
         }

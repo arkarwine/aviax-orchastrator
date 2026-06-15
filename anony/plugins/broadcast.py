@@ -19,6 +19,13 @@ broadcast_state = None
 runtime_broadcast_task: asyncio.Task | None = None
 
 
+def broadcast_active() -> bool:
+    return bool(
+        broadcast_state
+        or (runtime_broadcast_task and not runtime_broadcast_task.done())
+    )
+
+
 def progress_text(state: dict, *, paused_for: int | None = None) -> str:
     processed = state["processed"]
     total = state["total"]
