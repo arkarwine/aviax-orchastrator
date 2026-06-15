@@ -38,8 +38,17 @@ def format_wait(seconds: int) -> str:
     return f"about {minutes} minute{'s' if minutes != 1 else ''}"
 
 
-async def send_play_log_safely(m: types.Message, link: str, title: str, duration: str) -> None:
+async def send_play_log_safely(
+    m: types.Message,
+    sent: types.Message,
+    title: str,
+    duration: str,
+) -> None:
     try:
+        try:
+            link = sent.link or ""
+        except Exception:
+            link = ""
         await asyncio.wait_for(
             utils.play_log(m, link, title, duration),
             timeout=10,
@@ -152,38 +161,46 @@ async def play_hndlr(
         f"Found <b>{escape(file.title)}</b>.\n\n🎚️ Preparing your playback request...",
     )
 
-    if await db.is_logger():
-        asyncio.create_task(
-            send_play_log_safely(m, sent.link, file.title, file.duration),
-            name=f"play-log-{m.chat.id}",
-        )
+    try:
+        if db.logger:
+            asyncio.create_task(
+                send_play_log_safely(m, sent, file.title, file.duration),
+                name=f"play-log-{m.chat.id}",
+            )
 
-    file.user = mention
-    file.requester_id = m.from_user.id
-    file.queue_id = file.queue_id or uuid4().hex[:10]
-    for track in tracks:
-        track.requester_id = m.from_user.id
-        track.queue_id = track.queue_id or uuid4().hex[:10]
+        file.user = mention
+        file.requester_id = m.from_user.id
+        file.queue_id = file.queue_id or uuid4().hex[:10]
+        for track in tracks:
+            track.requester_id = m.from_user.id
+            track.queue_id = track.queue_id or uuid4().hex[:10]
 
-    duplicate = queue.duplicate_position(m.chat.id, file.id)
-    if duplicate >= 0 and not force:
+        duplicate = queue.duplicate_position(m.chat.id, file.id)
+        if duplicate >= 0 and not force:
+            return await sent.edit_text(
+                "♻️ <b>This track is already queued.</b>\n\n"
+                f"🎵 {file.title}\n"
+                f"📍 Existing position: <code>{duplicate}</code>\n\n"
+                "💡 I kept the original request instead of adding a duplicate."
+            )
+
+        pending_by_user = queue.requester_pending_count(m.chat.id, m.from_user.id)
+        if pending_by_user >= config.USER_QUEUE_LIMIT and not force and m.from_user.id not in app.sudoers:
+            return await sent.edit_text(
+                "⚖️ <b>Your personal queue limit is full.</b>\n\n"
+                f"You already have <code>{pending_by_user}</code> pending requests in this chat.\n"
+                "💡 Remove one of your queued tracks or wait for it to play before adding another."
+            )
+        if tracks and not force and m.from_user.id not in app.sudoers:
+            available = max(0, config.USER_QUEUE_LIMIT - pending_by_user - 1)
+            tracks = tracks[:available]
+    except Exception:
+        logger.exception("Playback request preparation failed chat=%s", m.chat.id)
         return await sent.edit_text(
-            "♻️ <b>This track is already queued.</b>\n\n"
-            f"🎵 {file.title}\n"
-            f"📍 Existing position: <code>{duplicate}</code>\n\n"
-            "💡 I kept the original request instead of adding a duplicate."
+            "❌ <b>I could not prepare this playback request.</b>\n\n"
+            "The track was found, but its queue information could not be prepared.\n"
+            "💡 Try again once. If it repeats, send this message to the bot owner."
         )
-
-    pending_by_user = queue.requester_pending_count(m.chat.id, m.from_user.id)
-    if pending_by_user >= config.USER_QUEUE_LIMIT and not force and m.from_user.id not in app.sudoers:
-        return await sent.edit_text(
-            "⚖️ <b>Your personal queue limit is full.</b>\n\n"
-            f"You already have <code>{pending_by_user}</code> pending requests in this chat.\n"
-            "💡 Remove one of your queued tracks or wait for it to play before adding another."
-        )
-    if tracks and not force and m.from_user.id not in app.sudoers:
-        available = max(0, config.USER_QUEUE_LIMIT - pending_by_user - 1)
-        tracks = tracks[:available]
 
     maintenance_pending = getattr(m, "maintenance_restart", False) or marker.exists()
     restoration_pending = bool(queue.get_deferred(m.chat.id))
@@ -192,7 +209,14 @@ async def play_hndlr(
         for item in deferred:
             item.maintenance_id = uuid4().hex[:10]
             item.maintenance_owner_id = m.from_user.id
-        positions = queue.defer_many(m.chat.id, deferred)
+        try:
+            positions = queue.defer_many(m.chat.id, deferred)
+        except Exception:
+            logger.exception("Could not persist maintenance queue chat=%s", m.chat.id)
+            return await sent.edit_text(
+                "❌ <b>I could not safely save this request for maintenance.</b>\n\n"
+                "💡 Check the deployment directory permissions and available disk space, then try again."
+            )
         grace = anon.maintenance_grace_remaining()
         grace_text = (
             f"approximately <code>{max(1, (grace + 59) // 60)}</code> minute(s) remain in the grace period"
@@ -233,11 +257,20 @@ async def play_hndlr(
             ),
         )
 
-    if force:
-        queue.force_add(m.chat.id, file)
-    else:
-        position = queue.add(m.chat.id, file)
+    try:
+        if force:
+            queue.force_add(m.chat.id, file)
+            position = 0
+        else:
+            position = queue.add(m.chat.id, file)
+    except Exception:
+        logger.exception("Could not persist playback queue chat=%s", m.chat.id)
+        return await sent.edit_text(
+            "❌ <b>I could not save this playback request.</b>\n\n"
+            "💡 Check the deployment directory permissions and available disk space, then try again."
+        )
 
+    if not force:
         if position != 0 or await db.get_call(m.chat.id):
             wait = format_wait(queue.estimated_wait(m.chat.id, position))
             await sent.edit_text(

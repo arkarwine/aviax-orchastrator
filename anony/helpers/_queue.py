@@ -4,6 +4,7 @@
 
 
 import json
+import threading
 from collections import defaultdict, deque
 from dataclasses import asdict
 from pathlib import Path
@@ -20,6 +21,9 @@ class Queue:
         self.deferred: dict[int, deque[MediaItem]] = defaultdict(deque)
         self.deferred_path = Path.cwd() / ".maintenance-queue.json"
         self.live_path = Path.cwd() / ".playback-queue.json"
+        self._live_persist_lock = threading.Lock()
+        self._live_persist_dirty = False
+        self._live_persist_running = False
         self.load_deferred()
         self.recover_live()
 
@@ -46,14 +50,36 @@ class Queue:
         temporary.replace(self.deferred_path)
 
     def save_live(self) -> None:
-        data = {
-            str(chat_id): [self._serialize(item) for item in items]
-            for chat_id, items in self.queues.items()
-            if items
-        }
-        temporary = self.live_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(data, ensure_ascii=True), encoding="utf-8")
-        temporary.replace(self.live_path)
+        with self._live_persist_lock:
+            self._live_persist_dirty = True
+            if self._live_persist_running:
+                return
+            self._live_persist_running = True
+        threading.Thread(
+            target=self._live_persist_worker,
+            name="playback-queue-persist",
+            daemon=True,
+        ).start()
+
+    def _live_persist_worker(self) -> None:
+        while True:
+            with self._live_persist_lock:
+                if not self._live_persist_dirty:
+                    self._live_persist_running = False
+                    return
+                self._live_persist_dirty = False
+            try:
+                data = {
+                    str(chat_id): [self._serialize(item) for item in list(items)]
+                    for chat_id, items in list(self.queues.items())
+                    if items
+                }
+                temporary = self.live_path.with_suffix(".json.tmp")
+                temporary.write_text(json.dumps(data, ensure_ascii=True), encoding="utf-8")
+                temporary.replace(self.live_path)
+            except Exception:
+                # The next queue mutation retries persistence without blocking playback.
+                pass
 
     def recover_live(self) -> None:
         try:
