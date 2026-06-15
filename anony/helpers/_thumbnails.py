@@ -87,7 +87,7 @@ class Thumbnail:
             cache_dir = Path.cwd() / "cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
             temp = cache_dir / f"temp_{song.id}.jpg"
-            output = cache_dir / f"{song.id}_nowplaying_v4.gif"
+            output = cache_dir / f"{song.id}_nowplaying_v5.gif"
             if output.exists():
                 return str(output)
 
@@ -141,12 +141,13 @@ class Thumbnail:
                 fill=(*accent_soft, 255),
             )
 
+            palette = base.convert("P", palette=Image.Palette.ADAPTIVE, colors=256)
             frames = []
-            for frame_index in range(12):
+            for frame_index in range(24):
                 frame = base.copy()
                 frame_draw = ImageDraw.Draw(frame)
                 for index in range(7):
-                    wave = math.sin((frame_index / 12) * math.tau + index * 0.82)
+                    wave = math.sin((frame_index / 24) * math.tau + index * 0.82)
                     height = round(31 + wave * 14)
                     left = round((770 + index * 17) * scale)
                     bottom = round(426 * scale)
@@ -155,16 +156,21 @@ class Thumbnail:
                         radius=round(4 * scale),
                         fill=(*accent_soft, 245),
                     )
-                frames.append(frame.convert("P", palette=Image.Palette.ADAPTIVE, colors=256))
+                frames.append(
+                    frame.convert("RGB").quantize(
+                        palette=palette,
+                        dither=Image.Dither.NONE,
+                    )
+                )
 
             frames[0].save(
                 output,
                 save_all=True,
                 append_images=frames[1:],
-                duration=260,
+                duration=100,
                 loop=0,
                 optimize=True,
-                disposal=2,
+                disposal=1,
             )
             try:
                 temp.unlink(missing_ok=True)

@@ -211,11 +211,36 @@ async def play_hndlr(
             item.maintenance_owner_id = m.from_user.id
         try:
             positions = queue.defer_many(m.chat.id, deferred)
+        except TypeError:
+            logger.exception("Maintenance queue contains unsupported data chat=%s", m.chat.id)
+            return await sent.edit_text(
+                "❌ <b>I could not save this request because its track data is invalid.</b>\n\n"
+                "💡 Try the request again. If it repeats for this track, send its link to the bot owner."
+            )
+        except PermissionError:
+            logger.exception("Maintenance queue is not writable chat=%s", m.chat.id)
+            return await sent.edit_text(
+                "❌ <b>I could not save this request because maintenance storage is not writable.</b>\n\n"
+                "💡 The bot owner needs to restore write permission for the deployment folder."
+            )
+        except OSError as exc:
+            logger.exception("Could not persist maintenance queue chat=%s", m.chat.id)
+            detail = (
+                "The server does not have enough free storage."
+                if getattr(exc, "errno", None) == 28
+                else "The server could not update maintenance storage."
+            )
+            return await sent.edit_text(
+                "❌ <b>I could not safely save this request for maintenance.</b>\n\n"
+                f"{detail}\n"
+                "💡 Please try again shortly. The bot owner has been given a precise error in the logs."
+            )
         except Exception:
             logger.exception("Could not persist maintenance queue chat=%s", m.chat.id)
             return await sent.edit_text(
                 "❌ <b>I could not safely save this request for maintenance.</b>\n\n"
-                "💡 Check the deployment directory permissions and available disk space, then try again."
+                "An unexpected track-storage error occurred.\n"
+                "💡 Please try again shortly. The bot owner can inspect the precise error in the logs."
             )
         grace = anon.maintenance_grace_remaining()
         grace_text = (

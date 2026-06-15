@@ -21,6 +21,7 @@ class Queue:
         self.deferred: dict[int, deque[MediaItem]] = defaultdict(deque)
         self.deferred_path = Path.cwd() / ".maintenance-queue.json"
         self.live_path = Path.cwd() / ".playback-queue.json"
+        self._deferred_persist_lock = threading.RLock()
         self._live_persist_lock = threading.Lock()
         self._live_persist_dirty = False
         self._live_persist_running = False
@@ -37,17 +38,21 @@ class Queue:
         return item_type(**item["data"])
 
     def save_deferred(self) -> None:
-        data = {
-            str(chat_id): [self._serialize(item) for item in items]
-            for chat_id, items in self.deferred.items()
-            if items
-        }
-        temporary = self.deferred_path.with_suffix(".json.tmp")
-        temporary.write_text(
-            json.dumps(data, ensure_ascii=True),
-            encoding="utf-8",
-        )
-        temporary.replace(self.deferred_path)
+        with self._deferred_persist_lock:
+            data = {
+                str(chat_id): [self._serialize(item) for item in items]
+                for chat_id, items in self.deferred.items()
+                if items
+            }
+            temporary = self.deferred_path.with_suffix(".json.tmp")
+            try:
+                temporary.write_text(
+                    json.dumps(data, ensure_ascii=True),
+                    encoding="utf-8",
+                )
+                temporary.replace(self.deferred_path)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def save_live(self) -> None:
         with self._live_persist_lock:
@@ -116,17 +121,22 @@ class Queue:
                 pass
 
     def defer(self, chat_id: int, item: MediaItem) -> int:
-        self.deferred[chat_id].append(item)
-        self.save_deferred()
-        return len(self.deferred[chat_id])
+        return self.defer_many(chat_id, [item])[0]
 
     def defer_many(self, chat_id: int, items: list[MediaItem]) -> list[int]:
-        positions = []
-        for item in items:
-            self.deferred[chat_id].append(item)
-            positions.append(len(self.deferred[chat_id]))
-        self.save_deferred()
-        return positions
+        with self._deferred_persist_lock:
+            original_length = len(self.deferred[chat_id])
+            positions = []
+            for item in items:
+                self.deferred[chat_id].append(item)
+                positions.append(len(self.deferred[chat_id]))
+            try:
+                self.save_deferred()
+            except Exception:
+                while len(self.deferred[chat_id]) > original_length:
+                    self.deferred[chat_id].pop()
+                raise
+            return positions
 
     def get_deferred(self, chat_id: int) -> list[MediaItem]:
         return list(self.deferred[chat_id])

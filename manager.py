@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import asyncio
-import hashlib
 import html
 import json
 import logging
@@ -80,18 +79,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
-
-def calculate_code_revision(template_path: Path) -> str:
-    digest = hashlib.sha256()
-    paths = [template_path / "config.py"]
-    paths.extend(sorted((template_path / "anony").rglob("*.py")))
-    for path in paths:
-        if not path.is_file():
-            continue
-        digest.update(str(path.relative_to(template_path)).encode("utf-8"))
-        digest.update(path.read_bytes())
-    return digest.hexdigest()[:16]
 
 
 class SecretRedactionFilter(logging.Filter):
@@ -424,7 +411,6 @@ class BotManager:
     def __init__(self, config: ManagerConfig, store: DeploymentStore) -> None:
         self.config = config
         self.store = store
-        self.code_revision = calculate_code_revision(self.config.template_path)
         self.shutdown_event = threading.Event()
         self.monitor_interval = max(5, int(os.getenv("MANAGER_MONITOR_INTERVAL", "20")))
         self.health_stale_after = max(30, int(os.getenv("MANAGER_HEALTH_STALE_AFTER", "120")))
@@ -458,11 +444,10 @@ class BotManager:
             bot_token=self.config.bot_token,
         )
         logger.info(
-            "Manager bot configured for owner_id=%s, sudoers=%d, deployments_dir=%s, code_revision=%s",
+            "Manager bot configured for owner_id=%s, sudoers=%d, and deployments_dir=%s",
             self.config.owner_id,
             len(self.config.sudoers),
             self.config.deployments_dir,
-            self.code_revision,
         )
 
         self.authorized_filter = filters.user(self.config.authorized_users)
@@ -1054,8 +1039,6 @@ class BotManager:
                 f"\nPlayback failures: <code>{html.escape(str(health.get('playback_failures', {})))[:400]}</code>"
                 f"\nSaved maintenance requests: <code>{health.get('maintenance_queued_requests', 0)}</code>"
                 f"\nMaintenance grace remaining: <code>{health.get('maintenance_grace_remaining', 'not pending')}</code>"
-                f"\nRunning code: <code>{html.escape(str(health.get('code_revision') or 'legacy'))}</code>"
-                f"\nManager template: <code>{self.code_revision}</code>"
             )
         if deployment.pid and self.process_matches(deployment):
             try:
@@ -2174,87 +2157,6 @@ class BotManager:
         )
         return True
 
-    def queue_code_update_restart(self, deployment: DeploymentMeta, health: Optional[dict]) -> bool:
-        if (
-            not health
-            or deployment.pending_restart
-            or deployment.intentionally_stopped
-            or not deployment.desired_running
-            or not self.process_matches(deployment)
-        ):
-            return False
-        try:
-            if time.time() - float(health.get("timestamp", 0)) > self.health_stale_after:
-                return False
-        except (TypeError, ValueError):
-            return False
-
-        running_revision = str(health.get("code_revision") or "legacy")
-        if running_revision == self.code_revision:
-            return False
-
-        reason = "scheduled maintenance to apply updated bot code"
-        deployment.pending_restart = True
-        deployment.restart_requested_at = datetime.now(timezone.utc).isoformat()
-        deployment.restart_requested_by = self.config.owner_id
-        deployment.pending_restart_reason = reason
-        try:
-            self.write_restart_marker(deployment)
-        except OSError:
-            self.clear_pending_restart(deployment)
-            deployment.last_failure = "Could not queue the code-update maintenance restart."
-            self.store.update(deployment)
-            logger.exception("Could not create code-update restart marker for %s.", deployment.name)
-            self._notify_owner(
-                f"❌ Updated code is available for <b>{deployment.name}</b>, but its maintenance "
-                "restart could not be queued.\n\n"
-                f"💡 Review <code>/logs {deployment.name}</code> and use "
-                f"<code>/restart {deployment.name}</code>."
-            )
-            return False
-
-        self.store.update(deployment)
-        streams = self.active_stream_count(deployment)
-        waiting = (
-            "waiting for a fresh heartbeat before restarting"
-            if streams is None
-            else (
-                "restarting as soon as the watcher confirms the deployment is idle"
-                if streams == 0
-                else f"waiting for {streams} active stream{'s' if streams != 1 else ''} to finish"
-            )
-        )
-        self.audit.record(
-            "code_update_restart",
-            issuer_id=self.config.owner_id,
-            deployment=deployment.name,
-            result="queued",
-            detail=f"{running_revision}->{self.code_revision}",
-        )
-        self._notify_owner(
-            f"🛠️ <b>Code-update maintenance queued for {deployment.name}</b>\n\n"
-            f"Running revision: <code>{html.escape(running_revision)}</code>\n"
-            f"Available revision: <code>{self.code_revision}</code>\n\n"
-            f"🔄 The manager is {waiting}. Existing streams can finish, and new playback "
-            "requests will be saved and resumed after maintenance."
-        )
-        return True
-
-    def refresh_code_revision(self) -> None:
-        try:
-            revision = calculate_code_revision(self.config.template_path)
-        except OSError:
-            logger.exception("Could not calculate the current deployment code revision.")
-            return
-        if revision == self.code_revision:
-            return
-        logger.info(
-            "Deployment code revision changed from %s to %s; stale deployments will receive maintenance restarts.",
-            self.code_revision,
-            revision,
-        )
-        self.code_revision = revision
-
     def _run_pending_restart_locked(self, deployment: DeploymentMeta) -> None:
         with self.recovery_guard:
             if (
@@ -2635,11 +2537,27 @@ class BotManager:
     def _monitor_loop(self) -> None:
         logger.info("Deployment watcher started with interval %s seconds.", self.monitor_interval)
         while not self.shutdown_event.wait(self.monitor_interval):
-            self.refresh_code_revision()
             for deployment in list(self.store.list().values()):
                 try:
+                    if (
+                        deployment.pending_restart
+                        and deployment.pending_restart_reason
+                        == "scheduled maintenance to apply updated bot code"
+                    ):
+                        self.clear_pending_restart(deployment)
+                        self.store.update(deployment)
+                        self.audit.record(
+                            "code_update_restart",
+                            issuer_id=self.config.owner_id,
+                            deployment=deployment.name,
+                            result="cancelled",
+                            detail="automatic code-update restarts were disabled",
+                        )
+                        logger.info(
+                            "Cancelled obsolete automatic code-update restart for %s.",
+                            deployment.name,
+                        )
                     health = self.read_health(deployment)
-                    self.queue_code_update_restart(deployment, health)
                     self.queue_heartbeat_restart(deployment, health)
                     if (
                         deployment.pending_restart
@@ -2748,7 +2666,6 @@ class BotManager:
             env["API_KEY"] = self.config.api_key
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONPATH"] = str(self.config.template_path)
-        env["DEPLOYMENT_CODE_REVISION"] = self.code_revision
 
         log_file = deployment.deployment_path / "run.log"
         health_file = deployment.deployment_path / ".health.json"
