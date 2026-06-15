@@ -1623,8 +1623,11 @@ class BotManager:
 
         env_path = deployment_dir / ".env"
         manager_downloads_path = os.getenv("MANAGER_DOWNLOADS_PATH", "")
-        if manager_downloads_path and not Path(manager_downloads_path).is_absolute():
-            manager_downloads_path = str((ROOT / manager_downloads_path).resolve())
+        if manager_downloads_path:
+            downloads_path = Path(manager_downloads_path).expanduser()
+            if not downloads_path.is_absolute():
+                downloads_path = ROOT / downloads_path
+            manager_downloads_path = str(downloads_path.resolve())
 
         deployment_id = uuid.uuid4().hex
         db_name = requested_db_name or normalize_name(f"{name}_{bot_user.id}_{deployment_id[:8]}")
@@ -2659,9 +2662,10 @@ class BotManager:
         env.update(deployment_env)
         manager_downloads_path = os.getenv("MANAGER_DOWNLOADS_PATH")
         if manager_downloads_path:
-            if not Path(manager_downloads_path).is_absolute():
-                manager_downloads_path = str((ROOT / manager_downloads_path).resolve())
-            env["DOWNLOADS_PATH"] = manager_downloads_path
+            downloads_path = Path(manager_downloads_path).expanduser()
+            if not downloads_path.is_absolute():
+                downloads_path = ROOT / downloads_path
+            env["DOWNLOADS_PATH"] = str(downloads_path.resolve())
         if self.config.api_key:
             env["API_KEY"] = self.config.api_key
         env["PYTHONUNBUFFERED"] = "1"

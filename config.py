@@ -61,7 +61,7 @@ class Config:
         self.SESSION3 = self.managed_value("SESSION3")
         self.SESSION_PATH = self.value("SESSION_PATH")
         downloads_path = self.value("DOWNLOADS_PATH", "")
-        self.DOWNLOADS_PATH = Path(downloads_path).resolve() if downloads_path else None
+        self.DOWNLOADS_PATH = Path(downloads_path).expanduser().resolve() if downloads_path else None
 
         self.SUPPORT_CHANNEL = self.value("SUPPORT_CHANNEL", "https://t.me/fallenx")
         self.SUPPORT_CHAT = self.value("SUPPORT_CHAT", "https://t.me/DevilsHeavenMF")
@@ -154,7 +154,7 @@ class Config:
     def apply_runtime_config(self, config_values: dict) -> None:
         for key, value in config_values.items():
             if key == "DOWNLOADS_PATH":
-                self.DOWNLOADS_PATH = Path(value).resolve() if value else None
+                self.DOWNLOADS_PATH = Path(value).expanduser().resolve() if value else None
             elif key == "COOKIES_URL":
                 if isinstance(value, str):
                     self.COOKIES_URL = [
