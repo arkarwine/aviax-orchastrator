@@ -4,11 +4,13 @@
 
 
 import json
+import math
 import threading
 from collections import defaultdict, deque
-from dataclasses import asdict
+from dataclasses import fields
+from enum import Enum
 from pathlib import Path
-from typing import Union
+from typing import Any, Union
 
 from ._dataclass import Media, Track
 
@@ -29,8 +31,35 @@ class Queue:
         self.recover_live()
 
     @staticmethod
-    def _serialize(item: MediaItem) -> dict:
-        return {"type": type(item).__name__, "data": asdict(item)}
+    def _json_safe(value: Any) -> Any:
+        if value is None or isinstance(value, (str, bool, int)):
+            return value
+        if isinstance(value, float):
+            return value if math.isfinite(value) else 0
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, Enum):
+            return Queue._json_safe(value.value)
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        if isinstance(value, dict):
+            return {
+                str(key): Queue._json_safe(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple, set, deque)):
+            return [Queue._json_safe(item) for item in value]
+        return str(value)
+
+    @classmethod
+    def _serialize(cls, item: MediaItem) -> dict:
+        return {
+            "type": type(item).__name__,
+            "data": {
+                field.name: cls._json_safe(getattr(item, field.name))
+                for field in fields(item)
+            },
+        }
 
     @staticmethod
     def _deserialize(item: dict) -> MediaItem:
