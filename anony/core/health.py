@@ -82,9 +82,20 @@ class HealthReporter:
                 "logging_disabled": bool(config.LOGGING_DISABLED),
             }
 
+        async def broadcast_text(payload: dict) -> dict:
+            from anony.plugins.broadcast import start_runtime_broadcast
+
+            return await start_runtime_broadcast(
+                text=str(payload.get("text") or ""),
+                include_users=bool(payload.get("include_users")),
+                exclude_groups=bool(payload.get("exclude_groups")),
+                requested_by=int(payload.get("requested_by") or 0),
+            )
+
         handlers = {
             "refresh_sudoers": refresh_sudoers,
             "check_setup": check_setup,
+            "broadcast_text": broadcast_text,
         }
         for request_path in Path.cwd().glob(".runtime-control-*.json"):
             if request_path.name.startswith(".runtime-control-result-"):
@@ -100,7 +111,11 @@ class HealthReporter:
                 handler = handlers.get(operation)
                 if not handler:
                     raise ValueError("unsupported runtime control operation")
-                result.update({"success": True, "data": await handler()})
+                payload = request.get("payload") or {}
+                result.update({
+                    "success": True,
+                    "data": await handler(payload) if operation == "broadcast_text" else await handler(),
+                })
                 logger.info("Applied runtime control request %s operation=%s.", request_id, operation)
             except Exception as exc:
                 logger.exception("Runtime control request %s failed.", request_id)

@@ -469,6 +469,7 @@ class BotManager:
         self.app.on_message(filters.private & filters.command("addsudo") & owner)(self.addsudo)
         self.app.on_message(filters.private & filters.command(["delsudo", "rmsudo"]) & owner)(self.delsudo)
         self.app.on_message(filters.private & filters.command("backup") & owner)(self.backup)
+        self.app.on_message(filters.private & filters.command("broadcast") & owner)(self.broadcast)
         self.app.on_message(filters.private & filters.command("addbotsudo") & self.authorized_filter)(self.add_bot_sudo)
         self.app.on_message(filters.private & filters.command(["delbotsudo", "rmbotsudo"]) & self.authorized_filter)(self.del_bot_sudo)
         self.app.on_message(filters.private & filters.command("botsudolist") & self.authorized_filter)(self.bot_sudo_list)
@@ -500,6 +501,7 @@ class BotManager:
             "➕ /addsudo &lt;user_id&gt; - Grant manager access. Owner only.\n"
             "➖ /delsudo &lt;user_id&gt; - Remove manager access. Owner only.\n"
             "💾 /backup - Send a full disaster-recovery backup including databases. Owner only.\n"
+            "📣 /broadcast [-user] [-nochat] &lt;text&gt; - Broadcast through every running deployed bot. Owner only.\n"
             "🛡️ /addbotsudo &lt;deployment&gt; &lt;user_id&gt; - Add a deployed-bot sudo user and refresh it live.\n"
             "🚫 /delbotsudo &lt;deployment&gt; &lt;user_id&gt; - Remove a deployed-bot sudo user and refresh it live.\n"
             "👥 /botsudolist &lt;deployment&gt; - View a deployed bot's sudo users.\n",
@@ -606,6 +608,7 @@ class BotManager:
         self,
         deployment: DeploymentMeta,
         operation: str,
+        payload: Optional[dict] = None,
     ) -> tuple[bool, str, dict]:
         if not self.process_matches(deployment):
             return False, "the deployment is not running", {}
@@ -631,6 +634,7 @@ class BotManager:
                     {
                         "request_id": request_id,
                         "operation": operation,
+                        "payload": payload or {},
                         "requested_at": datetime.now(timezone.utc).isoformat(),
                     },
                     ensure_ascii=True,
@@ -640,7 +644,8 @@ class BotManager:
             temporary.replace(request_path)
         except OSError as exc:
             logger.warning(
-                "Could not request live sudo refresh for %s: %s",
+                "Could not request runtime control operation %s for %s: %s",
+                operation,
                 deployment.name,
                 exc,
             )
@@ -658,8 +663,9 @@ class BotManager:
                             return True, "the live update applied, but some command menus could not be updated", data
                         return True, "the live update was applied automatically", data
                     logger.warning(
-                        "Deployment %s rejected live sudo refresh: %s",
+                        "Deployment %s rejected runtime control operation %s: %s",
                         deployment.name,
+                        operation,
                         result.get("error") or "unknown error",
                     )
                     return False, "the deployed bot could not apply the live update", {}
@@ -669,7 +675,8 @@ class BotManager:
             return False, "the deployed bot did not confirm the live update in time", {}
         except (OSError, ValueError, TypeError) as exc:
             logger.warning(
-                "Could not read live sudo refresh result for %s: %s",
+                "Could not read runtime control operation %s result for %s: %s",
+                operation,
                 deployment.name,
                 exc,
             )
@@ -677,6 +684,86 @@ class BotManager:
         finally:
             request_path.unlink(missing_ok=True)
             result_path.unlink(missing_ok=True)
+
+    @handler_errors
+    async def broadcast(self, client: Client, message: Message) -> None:
+        parts = message.text.split(maxsplit=1)
+        command_text = parts[1].strip() if len(parts) > 1 else ""
+        include_users = "-user" in command_text.split()
+        exclude_groups = "-nochat" in command_text.split()
+        text = re.sub(r"(?<!\S)-(?:user|nochat)(?!\S)", "", command_text).strip()
+        if message.reply_to_message:
+            text = message.reply_to_message.text or message.reply_to_message.caption or text
+        if not text:
+            return await message.reply_text(
+                "📣 <b>Broadcast text is required.</b>\n\n"
+                "Reply to a text message or use:\n"
+                "<code>/broadcast [-user] [-nochat] your message</code>",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        if len(text) > 4096:
+            return await message.reply_text(
+                "❌ <b>The broadcast is too long.</b>\n\n"
+                "💡 Keep the message within Telegram's 4096-character text limit.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        deployments = [
+            deployment for deployment in self.store.list().values()
+            if deployment.desired_running and not deployment.intentionally_stopped
+        ]
+        if not deployments:
+            return await message.reply_text(
+                "📭 No deployed bots are currently expected to be running.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        status = await message.reply_text(
+            f"📣 <b>Dispatching broadcast to {len(deployments)} deployed bot(s)...</b>\n\n"
+            "⚡ Each healthy bot will begin delivering independently.",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+        payload = {
+            "text": text,
+            "include_users": include_users,
+            "exclude_groups": exclude_groups,
+            "requested_by": message.from_user.id,
+        }
+        results = await asyncio.gather(
+            *(
+                self.request_runtime_control(deployment, "broadcast_text", payload)
+                for deployment in deployments
+            )
+        )
+        accepted = []
+        rejected = []
+        recipients = 0
+        for deployment, (success, detail, data) in zip(deployments, results):
+            if success:
+                accepted.append(deployment.name)
+                recipients += int(data.get("recipient_count", 0) or 0)
+            else:
+                rejected.append(f"{deployment.name}: {detail}")
+        summary = (
+            "✅ <b>Broadcast dispatched.</b>\n\n"
+            f"🤖 Accepted by: <code>{len(accepted)}/{len(deployments)}</code> deployed bots\n"
+            f"📬 Combined recipients queued: <code>{recipients}</code>\n"
+            f"👤 Include users: <code>{'yes' if include_users else 'no'}</code>\n"
+            f"👥 Include groups: <code>{'no' if exclude_groups else 'yes'}</code>\n\n"
+            "⚡ Delivery continues independently on each deployed bot."
+        )
+        if rejected:
+            summary += "\n\n⚠️ <b>Not started</b>\n" + "\n".join(
+                f"• <code>{html.escape(item)}</code>" for item in rejected[:15]
+            )
+        self.audit.record(
+            "broadcast_all",
+            issuer_id=message.from_user.id,
+            deployment="all",
+            result="dispatched",
+            detail=f"accepted={len(accepted)} rejected={len(rejected)} recipients={recipients}",
+        )
+        await status.edit_text(summary)
 
     async def refresh_deployment_sudoers(
         self,

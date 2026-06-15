@@ -10,7 +10,7 @@ import aiohttp
 from PIL import (Image, ImageDraw, ImageEnhance,
                  ImageFilter, ImageFont, ImageOps)
 
-from anony import config
+from anony import app, config
 from anony.helpers import Track
 
 
@@ -203,7 +203,7 @@ class Thumbnail:
             cache_dir = Path.cwd() / "cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
             temp = cache_dir / f"temp_{song.id}.jpg"
-            output = cache_dir / f"{song.id}_nowplaying_v6.gif"
+            output = cache_dir / f"{song.id}_nowplaying_v7.gif"
             if output.exists():
                 return str(output)
 
@@ -258,7 +258,7 @@ class Thumbnail:
             draw.text(point(500, 344), f"{views} views  •  {song.duration}", font=meta_font, fill=(205, 212, 224, 255))
             draw.text(
                 point(500, 420),
-                self.shorten(config.NAME, 28),
+                self.shorten(getattr(app, "name", None) or config.NAME, 28),
                 font=badge_font,
                 fill=(*accent_soft, 255),
             )
@@ -289,7 +289,7 @@ class Thumbnail:
                 frame_draw = ImageDraw.Draw(frame)
                 self.draw_waveform(
                     frame_draw,
-                    point(690, 393),
+                    point(690, 405),
                     round(170 * scale),
                     phase,
                     accent_soft,
