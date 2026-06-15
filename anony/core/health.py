@@ -35,6 +35,7 @@ class HealthReporter:
             "maintenance_queued_requests": queue.deferred_count(),
             "maintenance_grace_remaining": anon.maintenance_grace_remaining(),
             "maintenance_grace_minutes": config.MAINTENANCE_GRACE_MINUTES,
+            "code_revision": os.getenv("DEPLOYMENT_CODE_REVISION", "legacy"),
         }
 
     def write(self, *, state: str | None = None, reason: str = "", event_loop_delay: float = 0.0) -> None:
