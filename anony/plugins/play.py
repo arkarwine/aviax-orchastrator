@@ -3,6 +3,7 @@
 # This file is part of AnonXMusic
 
 
+import asyncio
 from html import escape
 from pathlib import Path
 from uuid import uuid4
@@ -35,6 +36,18 @@ def format_wait(seconds: int) -> str:
         return "starting shortly"
     minutes = max(1, round(seconds / 60))
     return f"about {minutes} minute{'s' if minutes != 1 else ''}"
+
+
+async def send_play_log_safely(m: types.Message, link: str, title: str, duration: str) -> None:
+    try:
+        await asyncio.wait_for(
+            utils.play_log(m, link, title, duration),
+            timeout=10,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Play log delivery timed out chat=%s; playback continued", m.chat.id)
+    except Exception as exc:
+        logger.warning("Play log delivery failed chat=%s: %s", m.chat.id, exc)
 
 @app.on_message(
     filters.command(["play", "playforce", "vplay", "vplayforce"])
@@ -140,7 +153,10 @@ async def play_hndlr(
     )
 
     if await db.is_logger():
-        await utils.play_log(m, sent.link, file.title, file.duration)
+        asyncio.create_task(
+            send_play_log_safely(m, sent.link, file.title, file.duration),
+            name=f"play-log-{m.chat.id}",
+        )
 
     file.user = mention
     file.requester_id = m.from_user.id
@@ -259,7 +275,13 @@ async def play_hndlr(
                 f"<b>{escape(file.title)}</b>\n\nDownloading and preparing the audio stream...",
             )
             try:
-                file.file_path = await yt.download(file.id, video=video)
+                file.file_path = await asyncio.wait_for(
+                    yt.download(file.id, video=video),
+                    timeout=180,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Track download timed out chat=%s media=%s", m.chat.id, file.id)
+                file.file_path = None
             except Exception:
                 logger.exception("Track download failed in chat %s", m.chat.id)
                 file.file_path = None

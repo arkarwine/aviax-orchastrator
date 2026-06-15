@@ -177,11 +177,17 @@ class TgCall(PyTgCalls):
     ) -> None:
         client = await db.get_assistant(chat_id)
         _lang = await lang.get_lang(chat_id)
-        _thumb = (
-            await thumb.generate(media)
-            if isinstance(media, Track)
-            else config.DEFAULT_THUMB
-        ) if config.THUMB_GEN else None
+        _thumb = None
+        if config.THUMB_GEN:
+            try:
+                _thumb = (
+                    await asyncio.wait_for(thumb.generate(media), timeout=20)
+                    if isinstance(media, Track)
+                    else config.DEFAULT_THUMB
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Thumbnail generation timed out chat=%s media=%s", chat_id, media.id)
+                _thumb = config.DEFAULT_THUMB
 
         if not media.file_path:
             await message.edit_text(_lang["error_no_file"].format(config.SUPPORT_CHAT))
