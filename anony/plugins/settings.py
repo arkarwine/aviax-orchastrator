@@ -27,6 +27,8 @@ VALID_KEYS = [
     "START_IMG",
     "OWNER_LINK",
     "DURATION_LIMIT",
+    "MAINTENANCE_GRACE_MINUTES",
+    "USER_QUEUE_LIMIT",
 ]
 BOOL_KEYS = {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY"}
 RESTART_REQUIRED_KEYS = {
@@ -427,6 +429,8 @@ async def _settings(_, m: types.Message):
             "• thumb_gen (true/false)\n"
             "• video_play (true/false)\n"
             "• duration_limit (minutes, 1-10080)\n"
+            "• maintenance_grace_minutes (0-1440)\n"
+            "• user_queue_limit (1-100)\n"
             "• lang_code (e.g. en, fr, de)\n"
             "• default_thumb (image URL)\n"
             "• ping_img (image URL)\n"
@@ -437,6 +441,7 @@ async def _settings(_, m: types.Message):
             "Examples:\n"
             "<code>/config auto_leave true</code>\n"
             "<code>/config duration_limit 120</code>\n"
+            "<code>/config user_queue_limit 5</code>\n"
             "<code>/config lang_code en</code>\n"
             "<code>/config default_thumb https://example.com/thumb.jpg</code>\n"
             "<code>/config ping_img https://example.com/ping.jpg</code>\n"
@@ -456,7 +461,7 @@ async def _settings(_, m: types.Message):
         )
     if key not in VALID_KEYS:
         return await m.reply_text(
-            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, duration_limit, lang_code, default_thumb, ping_img, start_img, owner_link"
+            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, duration_limit, maintenance_grace_minutes, user_queue_limit, lang_code, default_thumb, ping_img, start_img, owner_link"
         )
 
     if len(m.command) == 2:
@@ -466,7 +471,7 @@ async def _settings(_, m: types.Message):
             current_value = int(current_value) // 60
         await m.reply_text(
             f"<b>{key}</b> = <code>{short(str(current_value))}</code>\n"
-            f"{'(minutes) ' if key == 'DURATION_LIMIT' else ''}"
+            f"{'(minutes) ' if key in {'DURATION_LIMIT', 'MAINTENANCE_GRACE_MINUTES'} else ''}"
             f"({'override' if stored_value is not None else 'default'})"
         )
         return
@@ -497,6 +502,22 @@ async def _settings(_, m: types.Message):
             )
         display_value = f"{int(value)} minutes"
         value = int(value) * 60
+    elif key == "MAINTENANCE_GRACE_MINUTES":
+        if not value.isdigit() or not 0 <= int(value) <= 1440:
+            return await m.reply_text(
+                "❌ Maintenance grace period must be between 0 and 1440 minutes.\n\n"
+                "💡 Example: <code>/config maintenance_grace_minutes 10</code>"
+            )
+        value = int(value)
+        display_value = f"{value} minutes"
+    elif key == "USER_QUEUE_LIMIT":
+        if not value.isdigit() or not 1 <= int(value) <= 100:
+            return await m.reply_text(
+                "❌ Personal queue limit must be between 1 and 100.\n\n"
+                "💡 Example: <code>/config user_queue_limit 5</code>"
+            )
+        value = int(value)
+        display_value = f"{value} requests per user"
 
     await db.set_config(key, value)
     config.apply_runtime_config({key: value})
@@ -505,8 +526,12 @@ async def _settings(_, m: types.Message):
         f"✅ Updated <code>{key}</code>.\n"
         f"Current value: <code>{short(str(display_value))}</code>\n\n"
         + (
-            "⚡ The new limit applies immediately to new playback requests."
-            if key == "DURATION_LIMIT"
+            (
+                "🛠️ The new grace period applies immediately to pending and future maintenance restarts."
+                if key == "MAINTENANCE_GRACE_MINUTES"
+                else "⚡ The new limit applies immediately to new playback requests."
+            )
+            if key in {"DURATION_LIMIT", "MAINTENANCE_GRACE_MINUTES"}
             else ""
         )
     )
@@ -538,6 +563,10 @@ async def _get_setting(_, m: types.Message):
             return await m.reply_text(f"❌ Setting <code>{key}</code> not found")
         if key == "DURATION_LIMIT":
             default = f"{int(default) // 60} minutes"
+        elif key == "MAINTENANCE_GRACE_MINUTES":
+            default = f"{int(default)} minutes"
+        elif key == "USER_QUEUE_LIMIT":
+            default = f"{int(default)} requests per user"
         return await m.reply_text(f"<code>{key}</code> = <code>{default}</code>\n(default)")
     
     # Mask sensitive values
@@ -545,6 +574,10 @@ async def _get_setting(_, m: types.Message):
         value = "***"
     elif key == "DURATION_LIMIT":
         value = f"{int(value) // 60} minutes"
+    elif key == "MAINTENANCE_GRACE_MINUTES":
+        value = f"{int(value)} minutes"
+    elif key == "USER_QUEUE_LIMIT":
+        value = f"{int(value)} requests per user"
     
     await m.reply_text(f"<code>{key}</code> = <code>{value}</code>\n(override)")
 
@@ -571,11 +604,13 @@ async def _reset_setting(_, m: types.Message):
         "AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY",
         "LANG_CODE", "DEFAULT_THUMB", "PING_IMG", "START_IMG", "OWNER_LINK",
         "DURATION_LIMIT",
+        "MAINTENANCE_GRACE_MINUTES",
+        "USER_QUEUE_LIMIT",
     }
     
     if key not in valid_keys:
         return await m.reply_text(
-            "❌ Invalid setting key. Available keys: auto_leave, auto_end, thumb_gen, video_play, duration_limit, lang_code, default_thumb, ping_img, start_img, owner_link"
+            "❌ Invalid setting key. Available keys: auto_leave, auto_end, thumb_gen, video_play, duration_limit, maintenance_grace_minutes, user_queue_limit, lang_code, default_thumb, ping_img, start_img, owner_link"
         )
     
     original_value = config._runtime_defaults.get(key)
@@ -589,6 +624,10 @@ async def _reset_setting(_, m: types.Message):
     display_value = (
         f"{int(original_value) // 60} minutes"
         if key == "DURATION_LIMIT"
+        else f"{int(original_value)} minutes"
+        if key == "MAINTENANCE_GRACE_MINUTES"
+        else f"{int(original_value)} requests per user"
+        if key == "USER_QUEUE_LIMIT"
         else original_value
     )
     await m.reply_text(f"✅ Setting <code>{key}</code> reset to default.\nValue: <code>{display_value}</code>")

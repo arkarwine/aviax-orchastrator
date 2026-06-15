@@ -18,7 +18,7 @@ class HealthReporter:
         self._task: asyncio.Task | None = None
 
     def snapshot(self, event_loop_delay: float = 0.0) -> dict:
-        from anony import anon, db, userbot
+        from anony import anon, config, db, queue, userbot
 
         return {
             "state": self.state,
@@ -32,6 +32,9 @@ class HealthReporter:
             "playback_operations": anon.active_operations(),
             "playback_failures": anon.playback_diagnostics(),
             "restart_request": anon.restart_request(),
+            "maintenance_queued_requests": queue.deferred_count(),
+            "maintenance_grace_remaining": anon.maintenance_grace_remaining(),
+            "maintenance_grace_minutes": config.MAINTENANCE_GRACE_MINUTES,
         }
 
     def write(self, *, state: str | None = None, reason: str = "", event_loop_delay: float = 0.0) -> None:

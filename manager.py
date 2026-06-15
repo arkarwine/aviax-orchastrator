@@ -63,6 +63,8 @@ DEPLOYMENT_ENV_KEYS = {
     "VIDEO_API_URL",
     "API_KEY",
     "DOWNLOADS_PATH",
+    "MAINTENANCE_GRACE_MINUTES",
+    "USER_QUEUE_LIMIT",
     "AUTO_LEAVE",
     "AUTO_END",
     "THUMB_GEN",
@@ -491,8 +493,8 @@ class BotManager:
             "▶️ /deploy &lt;name&gt; - Start a stopped deployment.\n"
             "⏹️ /stop &lt;name&gt; - Stop a running deployment.\n"
             "🗑️ /delete &lt;name&gt; - Permanently delete a deployment.\n"
-            "🔄 /restart &lt;name|all&gt; [force] - Restart safely, or force an emergency restart.\n"
-            "✖️ /cancelrestart &lt;name|all&gt; - Cancel queued restart requests.\n"
+            "🛠️ /restart &lt;name|all&gt; [force] - Queue a stream-draining maintenance restart, or force emergency maintenance.\n"
+            "✖️ /cancelrestart &lt;name|all&gt; - Cancel queued maintenance restarts.\n"
             "📄 /logs &lt;name&gt; - Retrieve a deployment's full log.\n"
             "👥 /sudolist - View manager owner and sudo users.\n"
             "➕ /addsudo &lt;user_id&gt; - Grant manager access. Owner only.\n"
@@ -987,7 +989,7 @@ class BotManager:
         for name, deployment in self.store.list().items():
             state, health, _ = self.deployment_health(deployment)
             status = self.format_health_state(state)
-            pending = " — <code>🔄 restart queued</code>" if deployment.pending_restart else ""
+            pending = " — <code>🛠️ maintenance restart queued</code>" if deployment.pending_restart else ""
             streams = int((health or {}).get("active_voice_chats", 0) or 0)
             stream_text = f" — <code>🎵 {streams}</code>" if streams else ""
             operation = self.operations.current(name)
@@ -1035,6 +1037,8 @@ class BotManager:
                 f"\nAssistants online: <code>{health.get('assistants_online', 0)}</code>"
                 f"\nPlayback operations: <code>{html.escape(str(health.get('playback_operations', {})))[:400]}</code>"
                 f"\nPlayback failures: <code>{html.escape(str(health.get('playback_failures', {})))[:400]}</code>"
+                f"\nSaved maintenance requests: <code>{health.get('maintenance_queued_requests', 0)}</code>"
+                f"\nMaintenance grace remaining: <code>{health.get('maintenance_grace_remaining', 'not pending')}</code>"
             )
         if deployment.pid and self.process_matches(deployment):
             try:
@@ -1055,7 +1059,7 @@ class BotManager:
             text += f"\nLast failure: <code>{html.escape(deployment.last_failure)}</code>"
         if deployment.pending_restart:
             text += (
-                "\nRestart: <code>queued until active streams finish</code>"
+                "\nRestart: <code>maintenance restart queued until active streams finish</code>"
                 f"\nRequested: <code>{deployment.restart_requested_at or 'unknown'}</code>"
             )
             if deployment.pending_restart_reason:
@@ -1287,9 +1291,11 @@ class BotManager:
         )
         if result == "waiting":
             return await status.edit_text(
-                f"⏳ Restart for deployment <b>{name}</b> is waiting.\n\n"
+                f"🛠️ Maintenance restart for deployment <b>{name}</b> is waiting.\n\n"
                 f"🎵 {detail}\n"
-                "🔄 It will restart automatically as soon as the deployment reports no active streams.\n\n"
+                "▶️ Existing streams and their next queued tracks may continue during the configured grace period.\n"
+                "💾 New playback requests will be saved for after the maintenance restart.\n"
+                "🔄 After the grace period, each current track may finish; remaining tracks are saved and maintenance starts once streams drain.\n\n"
                 f"💡 Use <code>/stop {name}</code> to cancel the queued restart and stop the deployment."
             )
         await status.edit_text(detail)
@@ -1399,7 +1405,7 @@ class BotManager:
                 f"⚫ Skipped: <code>{counts['skipped']}</code>",
                 f"❌ Failed: <code>{counts['failed']}</code>",
                 "",
-                "🔔 You will be notified when each waiting restart begins and completes.",
+                "🔔 You will be notified when each waiting maintenance restart begins and completes.",
             ]
         )
         await status.edit_text("\n".join(lines))
@@ -1457,7 +1463,7 @@ class BotManager:
             deployment.pending_restart = True
             deployment.restart_requested_at = datetime.now(timezone.utc).isoformat()
             deployment.restart_requested_by = requested_by
-            deployment.pending_restart_reason = "requested manually"
+            deployment.pending_restart_reason = "scheduled maintenance requested manually"
             try:
                 self.write_restart_marker(deployment)
             except OSError:
@@ -1485,9 +1491,9 @@ class BotManager:
 
         await status.edit_text(
             (
-                f"🚨 Force restarting deployment <b>{name}</b> immediately..."
+                f"🚨 Force restarting deployment <b>{name}</b> immediately for emergency maintenance..."
                 if force
-                else f"⚡ Deployment <b>{name}</b> has no active streams.\n\n🔄 Restarting immediately..."
+                else f"⚡ Deployment <b>{name}</b> has no active streams.\n\n🛠️ Restarting immediately for maintenance..."
             )
         )
         if deployment.is_running:
@@ -1507,7 +1513,7 @@ class BotManager:
             self.processes.pop(deployment.name, None)
             self.store.update(deployment)
 
-        await status.edit_text(f"🚀 Starting deployment <b>{name}</b>...")
+        await status.edit_text(f"🚀 Starting deployment <b>{name}</b> after maintenance...")
         started, error = self.start_process(deployment)
         if not started:
             self.clear_pending_restart(deployment)
@@ -1531,9 +1537,9 @@ class BotManager:
         return (
             "restarted",
             (
-                f"restarted immediately; PID <code>{deployment.pid}</code>"
+                f"completed maintenance restart immediately; PID <code>{deployment.pid}</code>"
                 if bulk
-                else f"✅ Deployment <b>{name}</b> restarted immediately.\nPID: <code>{deployment.pid}</code>"
+                else f"✅ Deployment <b>{name}</b> completed its maintenance restart.\nPID: <code>{deployment.pid}</code>"
             ),
         )
 
@@ -2047,7 +2053,10 @@ class BotManager:
         return deployment.deployment_path / ".restart-when-idle"
 
     def write_restart_marker(self, deployment: DeploymentMeta) -> None:
-        self.restart_marker_path(deployment).write_text(
+        marker = self.restart_marker_path(deployment)
+        if marker.exists():
+            return
+        marker.write_text(
             deployment.restart_requested_at or datetime.now(timezone.utc).isoformat(),
             encoding="ascii",
         )
@@ -2139,7 +2148,7 @@ class BotManager:
             detail=f"{reason}; chat={chat_id}; assistant={assistant_slot}",
         )
         self._notify_owner(
-            f"⚠️ <b>Playback recovery restart queued for {deployment.name}</b>\n\n"
+            f"⚠️ <b>Playback recovery maintenance restart queued for {deployment.name}</b>\n\n"
             f"Reason: <code>{html.escape(reason)}</code>\n"
             f"Affected chat: <code>{html.escape(str(chat_id))}</code>\n"
             f"Assistant slot: <code>{html.escape(str(assistant_slot))}</code>\n\n"
@@ -2177,8 +2186,9 @@ class BotManager:
             logger.info("Running queued idle restart for deployment %s.", deployment.name)
             self._notify_user(
                 requested_by,
-                f"🔄 Queued restart for deployment <b>{deployment.name}</b> is now underway.\n\n"
-                "✅ All active streams have finished. The deployment is restarting now."
+                f"🛠️ Maintenance restart for deployment <b>{deployment.name}</b> is now underway.\n\n"
+                "✅ All active streams have finished. Saved maintenance requests will resume "
+                "after the deployment starts again."
                 + (
                     f"\nReason: <code>{html.escape(deployment.pending_restart_reason)}</code>"
                     if deployment.pending_restart_reason
@@ -2192,7 +2202,7 @@ class BotManager:
                 self.store.update(deployment)
                 self._notify_user(
                     requested_by,
-                    f"❌ Queued restart for deployment <b>{deployment.name}</b> failed because "
+                    f"❌ Maintenance restart for deployment <b>{deployment.name}</b> failed because "
                     "the process could not be stopped.\n\n"
                     f"💡 Review <code>/logs {deployment.name}</code>, then request the restart again.",
                 )
@@ -2205,7 +2215,7 @@ class BotManager:
                 self.store.update(deployment)
                 self._notify_user(
                     requested_by,
-                    f"❌ Deployment <b>{deployment.name}</b> stopped after its streams finished "
+                    f"❌ Deployment <b>{deployment.name}</b> stopped for maintenance after its streams finished "
                     "but could not start again.\n\n"
                     f"💡 Review <code>/logs {deployment.name}</code>, then use <code>/deploy {deployment.name}</code>.",
                 )
@@ -2215,7 +2225,7 @@ class BotManager:
             self.store.update(deployment)
             self._notify_user(
                 requested_by,
-                f"✅ Deployment <b>{deployment.name}</b> restarted after all active streams finished.\n"
+                f"✅ Deployment <b>{deployment.name}</b> completed its maintenance restart after all active streams finished.\n"
                 f"PID: <code>{deployment.pid}</code>",
             )
             self.audit.record(

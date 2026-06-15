@@ -8,7 +8,14 @@ import re
 from pyrogram import enums, errors, filters, types
 
 from anony import anon, app, db, lang, queue, tg, yt
-from anony.helpers import admin_check, buttons, can_manage_vc
+from anony.helpers import admin_check, buttons, can_manage_vc, maintenance_status_text
+
+
+def format_wait(seconds: int) -> str:
+    if seconds <= 0:
+        return "starting shortly"
+    minutes = max(1, round(seconds / 60))
+    return f"about {minutes} minute{'s' if minutes != 1 else ''}"
 
 
 @app.on_callback_query(filters.regex("cancel_dl") & ~app.bl_users)
@@ -16,6 +23,97 @@ from anony.helpers import admin_check, buttons, can_manage_vc
 async def cancel_dl(_, query: types.CallbackQuery):
     await query.answer()
     await tg.cancel(query)
+
+
+@app.on_callback_query(filters.regex(r"^maintenance ") & ~app.bl_users)
+async def maintenance_callback(_, query: types.CallbackQuery):
+    action, chat_id_text, maintenance_id, owner_id_text = query.data.split()[1:]
+    chat_id = int(chat_id_text)
+    owner_id = int(owner_id_text)
+
+    if action == "status":
+        return await query.edit_message_text(
+            await maintenance_status_text(chat_id, maintenance_id),
+            reply_markup=buttons.maintenance_receipt(chat_id, maintenance_id, owner_id),
+        )
+
+    if action == "queue":
+        deferred = queue.get_deferred(chat_id)
+        text = "🛠️ <b>Saved maintenance requests</b>\n\n"
+        if deferred:
+            text += "<blockquote expandable>"
+            for index, media in enumerate(deferred[:15], start=1):
+                text += f"<b>{index}.</b> {media.title} — {media.duration}\n"
+            text += "</blockquote>"
+        else:
+            text += "✅ No requests are waiting for maintenance."
+        return await query.edit_message_text(
+            text,
+            reply_markup=buttons.maintenance_receipt(chat_id, maintenance_id, owner_id),
+        )
+
+    if query.from_user.id != owner_id and query.from_user.id not in app.sudoers:
+        admins = await db.get_admins(chat_id)
+        if query.from_user.id not in admins:
+            return await query.answer(
+                "Only the requester or a chat administrator can remove this saved request.",
+                show_alert=True,
+            )
+
+    removed = queue.remove_deferred(chat_id, maintenance_id)
+    if not removed:
+        return await query.answer(
+            "This saved request was already removed or has started playing.",
+            show_alert=True,
+        )
+    await query.answer("Removed from the maintenance queue.", show_alert=True)
+    await query.edit_message_text(
+        "🗑 <b>Removed from maintenance queue</b>\n\n"
+        f"🎵 {removed.title}\n"
+        "This request will not play after the maintenance restart."
+    )
+
+
+@app.on_callback_query(filters.regex(r"^queue_request ") & ~app.bl_users)
+async def queue_request_callback(_, query: types.CallbackQuery):
+    action, chat_id_text, queue_id, owner_id_text = query.data.split()[1:]
+    chat_id, owner_id = int(chat_id_text), int(owner_id_text)
+    position = queue.position(chat_id, queue_id)
+
+    if action == "status":
+        if position < 0:
+            return await query.answer("This request has played or left the queue.", show_alert=True)
+        media = queue.get_queue(chat_id)[position]
+        return await query.edit_message_text(
+            "📥 <b>Queue request</b>\n\n"
+            f"🎵 <b>Title:</b> {media.title}\n"
+            f"📍 Position: <code>{position}</code>\n"
+            f"⌛ Estimated wait: <code>{format_wait(queue.estimated_wait(chat_id, position))}</code>",
+            reply_markup=buttons.queue_receipt(chat_id, queue_id, owner_id),
+        )
+
+    if action == "queue":
+        items = queue.get_queue(chat_id)
+        text = "📋 <b>Current playback queue</b>\n\n<blockquote expandable>"
+        for index, media in enumerate(items[:15]):
+            text += f"<b>{index}.</b> {media.title} — {media.duration}\n"
+        return await query.edit_message_text(
+            text + "</blockquote>",
+            reply_markup=buttons.queue_receipt(chat_id, queue_id, owner_id),
+        )
+
+    if query.from_user.id != owner_id and query.from_user.id not in app.sudoers:
+        admins = await db.get_admins(chat_id)
+        if query.from_user.id not in admins:
+            return await query.answer(
+                "Only the requester or a chat administrator can remove this request.",
+                show_alert=True,
+            )
+    removed = queue.remove(chat_id, queue_id)
+    if not removed:
+        return await query.answer("This request has started or left the queue.", show_alert=True)
+    await query.answer("Removed from queue.", show_alert=True)
+    await query.edit_message_text(f"🗑 <b>Removed from queue</b>\n\n🎵 {removed.title}")
 
 
 @app.on_callback_query(filters.regex("controls") & ~app.bl_users)
@@ -39,6 +137,12 @@ async def _controls(_, query: types.CallbackQuery):
 
     if action == "status":
         return await query.answer()
+    if action == "queue":
+        items = queue.get_queue(chat_id)[1:6]
+        if not items:
+            return await query.answer("No tracks are waiting in the queue.", show_alert=True)
+        text = "\n".join(f"{index}. {item.title}" for index, item in enumerate(items, start=1))
+        return await query.answer(f"Next tracks:\n{text}", show_alert=True)
     await query.answer(query.lang["processing"], show_alert=True)
 
     if action == "pause":
@@ -71,6 +175,9 @@ async def _controls(_, query: types.CallbackQuery):
 
     elif action == "force":
         pos, media = queue.check_item(chat_id, args[3])
+        if not media:
+            pos = queue.position(chat_id, args[3])
+            media = queue.get_queue(chat_id)[pos] if pos > 0 else None
         if not media or pos == -1:
             return await query.edit_message_text(query.lang["play_expired"])
 
@@ -96,6 +203,12 @@ async def _controls(_, query: types.CallbackQuery):
         await anon.replay(chat_id)
         status = query.lang["replayed"]
         reply = query.lang["play_replayed"].format(user)
+
+    elif action == "loop":
+        enabled = bool(await db.get_loop(chat_id))
+        await db.set_loop(chat_id, 0 if enabled else 1)
+        reply = "🔁 Loop disabled." if enabled else "🔁 Current track will repeat once."
+        status = query.lang["playing"]
 
     elif action == "stop":
         await anon.stop(chat_id)

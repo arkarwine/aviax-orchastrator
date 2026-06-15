@@ -74,6 +74,18 @@ class Inline:
                     ),
                 ]
             )
+            keyboard.append(
+                [
+                    self.ikb(
+                        text="📋 Queue",
+                        callback_data=f"controls queue {chat_id}",
+                    ),
+                    self.ikb(
+                        text="🔁 Loop",
+                        callback_data=f"controls loop {chat_id}",
+                    ),
+                ]
+            )
         return self.ikm(keyboard)
 
     async def help_markup(
@@ -355,6 +367,65 @@ class Inline:
                     self.ikb(
                         text="✖️ Close",
                         callback_data="stats close",
+                        style=enums.ButtonStyle.DANGER,
+                    ),
+                ]
+            ]
+        )
+
+    def queue_receipt(
+        self, chat_id: int, queue_id: str, owner_id: int, allow_force: bool = True
+    ) -> types.InlineKeyboardMarkup:
+        rows = [
+            [
+                self.ikb(
+                    text="🔄 Refresh",
+                    callback_data=f"queue_request status {chat_id} {queue_id} {owner_id}",
+                    style=enums.ButtonStyle.PRIMARY,
+                ),
+                self.ikb(
+                    text="📋 Queue",
+                    callback_data=f"queue_request queue {chat_id} {queue_id} {owner_id}",
+                ),
+                self.ikb(
+                    text="🗑 Remove",
+                    callback_data=f"queue_request remove {chat_id} {queue_id} {owner_id}",
+                    style=enums.ButtonStyle.DANGER,
+                ),
+            ]
+        ]
+        if allow_force:
+            rows.append(
+                [
+                    self.ikb(
+                        text="▶️ Play Next",
+                        callback_data=f"controls force {chat_id} {queue_id}",
+                        style=enums.ButtonStyle.SUCCESS,
+                    )
+                ]
+            )
+        return self.ikm(rows)
+
+    def maintenance_receipt(
+        self, chat_id: int, maintenance_id: str, owner_id: int
+    ) -> types.InlineKeyboardMarkup:
+        return self.ikm(
+            [
+                [
+                    self.ikb(
+                        text="🔄 Check Status",
+                        callback_data=f"maintenance status {chat_id} {maintenance_id} {owner_id}",
+                        style=enums.ButtonStyle.PRIMARY,
+                    ),
+                    self.ikb(
+                        text="📋 View Saved",
+                        callback_data=f"maintenance queue {chat_id} {maintenance_id} {owner_id}",
+                    ),
+                ],
+                [
+                    self.ikb(
+                        text="🗑 Remove",
+                        callback_data=f"maintenance remove {chat_id} {maintenance_id} {owner_id}",
                         style=enums.ButtonStyle.DANGER,
                     ),
                 ]

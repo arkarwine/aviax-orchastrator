@@ -5,6 +5,7 @@
 
 from html import escape
 from pathlib import Path
+from uuid import uuid4
 
 from pyrogram import filters, types
 
@@ -28,6 +29,13 @@ def playlist_to_queue(chat_id: int, tracks: list) -> str:
     text = text[:1948] + "</blockquote>"
     return text
 
+
+def format_wait(seconds: int) -> str:
+    if seconds <= 0:
+        return "starting shortly"
+    minutes = max(1, round(seconds / 60))
+    return f"about {minutes} minute{'s' if minutes != 1 else ''}"
+
 @app.on_message(
     filters.command(["play", "playforce", "vplay", "vplayforce"])
     & filters.group
@@ -44,6 +52,10 @@ async def play_hndlr(
     url: str = None,
 ) -> None:
     sent = await reply_status(m, SEARCH_CUSTOM, "🔎", "Searching for your track...")
+    marker = Path(".restart-when-idle")
+    if not marker.exists() and queue.get_deferred(m.chat.id):
+        anon._maintenance_restore_attempts.pop(m.chat.id, None)
+        await anon.resume_maintenance_queues()
     file = None
     mention = m.from_user.mention
     media = tg.get_media(m.reply_to_message) if m.reply_to_message else None
@@ -120,26 +132,109 @@ async def play_hndlr(
             m.lang["play_duration_limit"].format(config.DURATION_LIMIT // 60)
         )
 
+    await edit_status(
+        sent,
+        SEARCH_CUSTOM,
+        "✅",
+        f"Found <b>{escape(file.title)}</b>.\n\n🎚️ Preparing your playback request...",
+    )
+
     if await db.is_logger():
         await utils.play_log(m, sent.link, file.title, file.duration)
 
     file.user = mention
+    file.requester_id = m.from_user.id
+    file.queue_id = file.queue_id or uuid4().hex[:10]
+    for track in tracks:
+        track.requester_id = m.from_user.id
+        track.queue_id = track.queue_id or uuid4().hex[:10]
+
+    duplicate = queue.duplicate_position(m.chat.id, file.id)
+    if duplicate >= 0 and not force:
+        return await sent.edit_text(
+            "♻️ <b>This track is already queued.</b>\n\n"
+            f"🎵 {file.title}\n"
+            f"📍 Existing position: <code>{duplicate}</code>\n\n"
+            "💡 I kept the original request instead of adding a duplicate."
+        )
+
+    pending_by_user = queue.requester_pending_count(m.chat.id, m.from_user.id)
+    if pending_by_user >= config.USER_QUEUE_LIMIT and not force and m.from_user.id not in app.sudoers:
+        return await sent.edit_text(
+            "⚖️ <b>Your personal queue limit is full.</b>\n\n"
+            f"You already have <code>{pending_by_user}</code> pending requests in this chat.\n"
+            "💡 Remove one of your queued tracks or wait for it to play before adding another."
+        )
+    if tracks and not force and m.from_user.id not in app.sudoers:
+        available = max(0, config.USER_QUEUE_LIMIT - pending_by_user - 1)
+        tracks = tracks[:available]
+
+    maintenance_pending = getattr(m, "maintenance_restart", False) or marker.exists()
+    restoration_pending = bool(queue.get_deferred(m.chat.id))
+    if maintenance_pending or restoration_pending:
+        deferred = [file, *tracks]
+        for item in deferred:
+            item.maintenance_id = uuid4().hex[:10]
+            item.maintenance_owner_id = m.from_user.id
+        positions = queue.defer_many(m.chat.id, deferred)
+        grace = anon.maintenance_grace_remaining()
+        grace_text = (
+            f"approximately <code>{max(1, (grace + 59) // 60)}</code> minute(s) remain in the grace period"
+            if grace is not None and grace > 0
+            else (
+                "maintenance will begin after the currently playing tracks finish"
+                if maintenance_pending
+                else "maintenance is complete and saved requests are being restored"
+            )
+        )
+        maintenance_text = (
+            (
+                "🛠️ <b>Queued for scheduled maintenance restart</b>\n\n"
+                if maintenance_pending
+                else "🛠️ <b>Queued behind saved maintenance requests</b>\n\n"
+            )
+            + f"🎵 <b>Title:</b> <a href={file.url}>{file.title}</a>\n"
+            + f"📥 Maintenance queue position: <code>{positions[0]}</code>\n\n"
+            + f"⏱️ {grace_text.capitalize()}.\n"
+            + (
+                "▶️ Existing playback may continue during the grace period.\n"
+                if maintenance_pending
+                else "▶️ Saved requests are being restored in their original order.\n"
+            )
+            + "💾 This request is saved and will begin automatically after the maintenance restart."
+            + (
+                f"\n\n📚 The other <code>{len(tracks)}</code> playlist tracks were saved too."
+                if tracks
+                else ""
+            )
+        )
+        return await sent.edit_text(
+            maintenance_text,
+            reply_markup=buttons.maintenance_receipt(
+                m.chat.id,
+                file.maintenance_id,
+                m.from_user.id,
+            ),
+        )
+
     if force:
         queue.force_add(m.chat.id, file)
     else:
         position = queue.add(m.chat.id, file)
 
         if position != 0 or await db.get_call(m.chat.id):
+            wait = format_wait(queue.estimated_wait(m.chat.id, position))
             await sent.edit_text(
-                m.lang["play_queued"].format(
-                    position,
-                    file.url,
-                    file.title,
-                    file.duration,
-                    m.from_user.mention,
-                ),
-                reply_markup=buttons.play_queued(
-                    m.chat.id, file.id, m.lang["play_now"]
+                "📥 <b>Added to playback queue</b>\n\n"
+                f"🎵 <b>Title:</b> <a href={file.url}>{file.title}</a>\n"
+                f"⏱️ Duration: <code>{file.duration}</code>\n"
+                f"📍 Position: <code>{position}</code>\n"
+                f"⌛ Estimated wait: <code>{wait}</code>\n"
+                f"🙋 Requested by: {m.from_user.mention}",
+                reply_markup=buttons.queue_receipt(
+                    m.chat.id,
+                    file.queue_id,
+                    m.from_user.id,
                 ),
             )
             if tracks:
@@ -157,7 +252,12 @@ async def play_hndlr(
         if fname.exists():
             file.file_path = str(fname)
         else:
-            await edit_status(sent, DOWNLOAD_CUSTOM, "⬇️", "Downloading and preparing the track...")
+            await edit_status(
+                sent,
+                DOWNLOAD_CUSTOM,
+                "⬇️",
+                f"<b>{escape(file.title)}</b>\n\nDownloading and preparing the audio stream...",
+            )
             try:
                 file.file_path = await yt.download(file.id, video=video)
             except Exception:
@@ -170,6 +270,12 @@ async def play_hndlr(
                 )
 
     try:
+        await edit_status(
+            sent,
+            SEARCH_CUSTOM,
+            "🎵",
+            f"<b>{escape(file.title)}</b>\n\nConnecting to the voice chat...",
+        )
         await anon.play_media(chat_id=m.chat.id, message=sent, media=file)
     except PlaybackRecoveryQueued:
         return

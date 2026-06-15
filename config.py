@@ -25,6 +25,7 @@ class Config:
         "API_ID", "API_HASH", "NAME", "DB_NAME", "DEPLOYMENT_ID", "MANAGED_SETUP",
         "BOT_TOKEN", "MONGO_URL", "OWNER_ID", "LOGGER_ID", "DURATION_LIMIT",
         "QUEUE_LIMIT", "PLAYLIST_LIMIT", "SESSION1", "SESSION2", "SESSION3",
+        "MAINTENANCE_GRACE_MINUTES", "USER_QUEUE_LIMIT",
         "SESSION_PATH", "DOWNLOADS_PATH", "SUPPORT_CHANNEL", "SUPPORT_CHAT", "OWNER_LINK",
         "API_URL", "VIDEO_API_URL", "API_KEY", "AUTO_LEAVE", "AUTO_END",
         "THUMB_GEN", "VIDEO_PLAY", "LANG_CODE", "COOKIES_URL", "DEFAULT_THUMB",
@@ -52,6 +53,8 @@ class Config:
         self.DURATION_LIMIT = self.integer("DURATION_LIMIT", 60) * 60
         self.QUEUE_LIMIT = self.integer("QUEUE_LIMIT", 20)
         self.PLAYLIST_LIMIT = self.integer("PLAYLIST_LIMIT", 20)
+        self.MAINTENANCE_GRACE_MINUTES = self.integer("MAINTENANCE_GRACE_MINUTES", 10)
+        self.USER_QUEUE_LIMIT = self.integer("USER_QUEUE_LIMIT", 5)
 
         self.SESSION1 = self.managed_value("SESSION")
         self.SESSION2 = self.managed_value("SESSION2")
@@ -101,6 +104,8 @@ class Config:
             "DOWNLOADS_PATH": self.DOWNLOADS_PATH,
             "LOGGING_DISABLED": self.LOGGING_DISABLED,
             "DURATION_LIMIT": self.DURATION_LIMIT,
+            "MAINTENANCE_GRACE_MINUTES": self.MAINTENANCE_GRACE_MINUTES,
+            "USER_QUEUE_LIMIT": self.USER_QUEUE_LIMIT,
         }
         del self._values
 
@@ -163,7 +168,7 @@ class Config:
                 self.API_KEY = value if value else None
             elif key in {"LOGGER_ID", "OWNER_ID"}:
                 self.__dict__[key] = int(value or 0)
-            elif key in {"QUEUE_LIMIT", "PLAYLIST_LIMIT", "DURATION_LIMIT"}:
+            elif key in {"QUEUE_LIMIT", "PLAYLIST_LIMIT", "DURATION_LIMIT", "MAINTENANCE_GRACE_MINUTES", "USER_QUEUE_LIMIT"}:
                 self.__dict__[key] = int(value)
             elif hasattr(self, key):
                 setattr(self, key, value)

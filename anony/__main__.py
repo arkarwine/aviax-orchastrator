@@ -10,7 +10,7 @@ import signal
 import traceback
 from contextlib import suppress
 
-from anony import anon, app, config, db, logger, stop, thumb, userbot, yt
+from anony import anon, app, config, db, logger, stop, tasks, thumb, userbot, yt
 from anony.core.commands import sync_command_menus
 from anony.core.health import health
 from anony.plugins import all_modules
@@ -114,6 +114,12 @@ async def main():
         logger.warning("Command menus registered with %d warning(s).", len(menu_warnings))
 
     health.mark_healthy()
+    tasks.append(
+        asyncio.create_task(
+            anon.maintenance_queue_worker(),
+            name="maintenance-queue-restore",
+        )
+    )
     await idle()
     await stop("termination signal received")
 

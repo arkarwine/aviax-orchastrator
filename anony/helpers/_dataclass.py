@@ -18,6 +18,10 @@ class Media:
     time: int = 0
     user: str = None
     video: bool = False
+    maintenance_id: str = None
+    maintenance_owner_id: int = 0
+    queue_id: str = None
+    requester_id: int = 0
 
 
 @dataclass
@@ -35,3 +39,7 @@ class Track:
     user: str = None
     view_count: str = None
     video: bool = False
+    maintenance_id: str = None
+    maintenance_owner_id: int = 0
+    queue_id: str = None
+    requester_id: int = 0

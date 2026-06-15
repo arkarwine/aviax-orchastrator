@@ -8,6 +8,7 @@ from ._api import NexGenApi
 from ._dataclass import Media, Track
 from ._exec import format_exception, meval
 from ._inline import Inline
+from ._maintenance import maintenance_status_text
 from ._queue import Queue
 from ._thumbnails import Thumbnail
 from ._utilities import Utilities

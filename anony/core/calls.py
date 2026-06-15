@@ -35,6 +35,7 @@ class TgCall(PyTgCalls):
         self._assistant_locks = defaultdict(asyncio.Lock)
         self._operations = {}
         self._last_stream_end = {}
+        self._maintenance_restore_attempts = {}
         self._playback_timeout_count = 0
         self._last_playback_timeout = None
         self._restart_request = None
@@ -204,6 +205,10 @@ class TgCall(PyTgCalls):
             ffmpeg_parameters=f"-ss {seek_time}" if seek_time > 1 else None,
         )
         try:
+            await self._edit_playback_feedback(
+                message,
+                f"🎵 <b>{media.title}</b>\n\nConnecting the prepared stream to the voice chat...",
+            )
             await self._start_playback_with_recovery(
                 client=client,
                 chat_id=chat_id,
@@ -213,11 +218,14 @@ class TgCall(PyTgCalls):
             if not seek_time:
                 media.time = 1
                 await db.add_call(chat_id)
-                text = _lang["play_media"].format(
-                    media.url,
-                    media.title,
-                    media.duration,
-                    media.user,
+                next_media = queue.get_next(chat_id, check=True)
+                text = (
+                    "▶️ <b>Now playing</b>\n\n"
+                    f"🎵 <b>Title:</b> <a href={media.url}>{media.title}</a>\n"
+                    f"⏱️ Duration: <code>{media.duration}</code>\n"
+                    f"🙋 Requested by: {media.user}\n\n"
+                    f"⏭️ Next: <b>{next_media.title if next_media else 'Nothing queued'}</b>\n"
+                    f"📋 Queue: <code>{max(0, len(queue.get_queue(chat_id)) - 1)}</code> waiting"
                 )
                 keyboard = buttons.controls(chat_id)
                 try:
@@ -318,11 +326,11 @@ class TgCall(PyTgCalls):
             try:
                 await app.send_message(
                     app.owner,
-                    "🚨 <b>Playback recovery restart queued</b>\n\n"
+                    "🚨 <b>Playback recovery maintenance restart queued</b>\n\n"
                     f"Playback stalled twice in chat <code>{chat_id}</code> using assistant "
                     f"slot <code>{self._assistant_slot(client)}</code>.\n\n"
-                    "📥 The affected queue was preserved. New playback requests are paused, "
-                    "and the deployment will restart after other active streams finish.",
+                    "📥 The affected queue was preserved. New requests will be saved in the "
+                    "maintenance queue, and the deployment will restart for maintenance after other active streams finish.",
                 )
             except Exception as exc:
                 logger.warning("Could not notify owner about playback recovery: %s", exc)
@@ -375,8 +383,8 @@ class TgCall(PyTgCalls):
                     message,
                     "🚨 <b>Playback could not reconnect after retrying.</b>\n\n"
                     "📥 Your queue has been preserved.\n"
-                    "⏸️ New playback requests are temporarily paused.\n"
-                    "🔄 A safe restart is queued and will begin after other active streams finish.",
+                    "💾 New requests will be saved for after the restart.\n"
+                    "🛠️ A maintenance restart is queued and will begin after other active streams finish.",
                 )
                 raise PlaybackRecoveryQueued from None
 
@@ -408,7 +416,122 @@ class TgCall(PyTgCalls):
             except PlaybackRecoveryQueued:
                 return
 
+    async def resume_maintenance_queues(self) -> None:
+        marker = Path.cwd() / ".restart-when-idle"
+        if marker.exists():
+            return
+
+        for chat_id in queue.deferred_chats():
+            now = time.monotonic()
+            if now - self._maintenance_restore_attempts.get(chat_id, 0) < 300:
+                continue
+            self._maintenance_restore_attempts[chat_id] = now
+            deferred = queue.get_deferred(chat_id)
+            if not deferred:
+                continue
+            try:
+                was_active = await db.get_call(chat_id)
+                for item in deferred:
+                    queue.add(chat_id, item)
+                if was_active:
+                    queue.pop_deferred(chat_id)
+                    self._maintenance_restore_attempts.pop(chat_id, None)
+                    await app.send_message(
+                        chat_id,
+                        "▶️ <b>Maintenance restart is no longer pending.</b>\n\n"
+                        f"📥 Added <code>{len(deferred)}</code> saved maintenance request"
+                        f"{'s' if len(deferred) != 1 else ''} to the active playback queue.",
+                    )
+                    await self._notify_maintenance_requesters(
+                        deferred,
+                        "▶️ Your saved music request was added back to the active queue "
+                        "because maintenance is no longer pending.",
+                    )
+                    continue
+                current = queue.get_current(chat_id)
+                msg = await app.send_message(
+                    chat_id,
+                    "🛠️ <b>Maintenance restart completed.</b>\n\n"
+                    f"▶️ Restoring <code>{len(deferred)}</code> saved playback request"
+                    f"{'s' if len(deferred) != 1 else ''} now...",
+                )
+                if not current.file_path:
+                    current.file_path = await asyncio.wait_for(
+                        yt.download(current.id, video=current.video),
+                        timeout=180,
+                    )
+                current.message_id = msg.id
+                await self.play_media(chat_id, msg, current)
+                if await db.get_call(chat_id):
+                    queue.pop_deferred(chat_id)
+                    self._maintenance_restore_attempts.pop(chat_id, None)
+                    await self._notify_maintenance_requesters(
+                        deferred,
+                        "✅ The music bot completed its maintenance restart.\n\n"
+                        "▶️ Your saved request is now in the restored playback queue.",
+                    )
+                    logger.info(
+                        "Restored %s maintenance queue item(s) for chat=%s",
+                        len(deferred),
+                        chat_id,
+                    )
+                else:
+                    queue.clear(chat_id)
+            except Exception:
+                queue.clear(chat_id)
+                logger.exception("Could not restore maintenance queue for chat=%s", chat_id)
+                try:
+                    await app.send_message(
+                        chat_id,
+                        "⚠️ <b>Maintenance restart completed, but saved playback could not start yet.</b>\n\n"
+                        "💾 Your maintenance queue is still saved. Start or reopen the voice chat, "
+                        "then send another playback request.",
+                    )
+                except Exception:
+                    pass
+
+    async def _notify_maintenance_requesters(self, items: list, text: str) -> None:
+        for user_id in {
+            item.maintenance_owner_id
+            for item in items
+            if getattr(item, "maintenance_owner_id", 0)
+        }:
+            try:
+                await app.send_message(user_id, text)
+            except Exception:
+                logger.debug("Could not notify maintenance requester user=%s", user_id)
+
+    async def maintenance_queue_worker(self) -> None:
+        while True:
+            try:
+                await self.resume_maintenance_queues()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Maintenance queue worker failed.")
+            await asyncio.sleep(15)
+
+    def maintenance_grace_remaining(self) -> int | None:
+        marker = Path.cwd() / ".restart-when-idle"
+        try:
+            deadline = marker.stat().st_mtime + (config.MAINTENANCE_GRACE_MINUTES * 60)
+        except OSError:
+            return None
+        return max(0, int(deadline - time.time()))
+
     async def _play_next(self, chat_id: int) -> None:
+        grace_remaining = self.maintenance_grace_remaining()
+        if grace_remaining == 0:
+            saved = queue.defer_live_remaining(chat_id)
+            await app.send_message(
+                chat_id,
+                "🛠️ <b>Maintenance grace period completed.</b>\n\n"
+                "⏹️ The current track has finished, so this stream is stopping for maintenance.\n"
+                f"💾 Saved <code>{saved}</code> remaining track"
+                f"{'s' if saved != 1 else ''} to resume after the restart.",
+            )
+            return await self._stop(chat_id)
+
         if loop := await db.get_loop(chat_id):
             await db.set_loop(chat_id, loop - 1)
             return await self._replay(chat_id)

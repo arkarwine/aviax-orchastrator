@@ -20,6 +20,7 @@ PUBLIC_GROUP_COMMANDS = [
     ("play", "Play a song or replied media"),
     ("vplay", "Play a video"),
     ("queue", "View the current queue"),
+    ("maintenance", "View maintenance restart status"),
     ("pause", "Pause the current stream"),
     ("resume", "Resume the paused stream"),
     ("skip", "Skip the current track"),

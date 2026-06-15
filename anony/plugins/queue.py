@@ -13,6 +13,16 @@ from anony.helpers import Track, buttons
 @lang.language()
 async def _queue_func(_, m: types.Message):
     if not await db.get_call(m.chat.id):
+        deferred = queue.get_deferred(m.chat.id)
+        if deferred:
+            text = (
+                "🛠️ <b>Maintenance playback queue</b>\n\n"
+                "💾 These requests are saved and will begin after the maintenance restart:\n\n"
+                "<blockquote expandable>"
+            )
+            for index, media in enumerate(deferred[:15], start=1):
+                text += f"<b>{index}.</b> {media.title} — {media.duration}\n"
+            return await m.reply_text(text + "</blockquote>")
         return await m.reply_text(m.lang["not_playing"])
 
     _reply = await m.reply_text(m.lang["queue_fetching"])
@@ -39,6 +49,16 @@ async def _queue_func(_, m: types.Message):
             _text += m.lang["queue_item"].format(
                 i + 1, media.title, media.duration
             )
+        _text += "</blockquote>"
+
+    deferred = queue.get_deferred(m.chat.id)
+    if deferred:
+        _text += (
+            "\n\n🛠️ <b>Saved for after maintenance restart</b>\n"
+            "<blockquote expandable>"
+        )
+        for index, media in enumerate(deferred[:15], start=1):
+            _text += f"<b>{index}.</b> {media.title} — {media.duration}\n"
         _text += "</blockquote>"
 
     _playing = await db.playing(m.chat.id)

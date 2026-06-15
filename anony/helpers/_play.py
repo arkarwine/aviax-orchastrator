@@ -22,18 +22,14 @@ def checkUB(play):
             await m.reply_text(m.lang["play_chat_invalid"])
             return await app.leave_chat(chat_id)
 
-        if Path(".restart-when-idle").exists():
-            return await m.reply_text(
-                "⏳ A restart is waiting for the current streams to finish.\n\n"
-                "💡 New playback requests are paused until the restart completes."
-            )
+        m.maintenance_restart = Path(".restart-when-idle").exists()
 
         if not m.reply_to_message and (
             len(m.command) < 2 or (len(m.command) == 2 and m.command[1] == "-f")
         ):
             return await m.reply_text(m.lang["play_usage"])
 
-        if len(queue.get_queue(chat_id)) >= config.QUEUE_LIMIT:
+        if len(queue.get_queue(chat_id)) + len(queue.get_deferred(chat_id)) >= config.QUEUE_LIMIT:
             return await m.reply_text(m.lang["play_queue_full"].format(config.QUEUE_LIMIT))
 
         force = m.command[0].endswith("force") or (

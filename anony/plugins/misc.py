@@ -98,17 +98,21 @@ async def update_timer(length=10):
                 remaining = duration - played
                 pos = min(int((played / duration) * length), length - 1)
                 timer = "—" * pos + "◉" + "—" * (length - pos - 1)
+                next_ready = False
 
                 if remaining <= 30:
                     next = queue.get_next(chat_id, check=True)
                     if next and not next.file_path:
                         next.file_path = await yt.download(next.id, video=next.video)
+                    next_ready = bool(next and next.file_path)
 
                 if remaining < 10:
                     remove = True
                 else:
                     if config.THUMB_GEN:
                         timer = f"{time.strftime('%M:%S', time.gmtime(played))} | {timer} | -{time.strftime('%M:%S', time.gmtime(remaining))}"
+                        if next_ready:
+                            timer = f"✅ Next ready • {timer}"
                     else:
                         timer = None
                     remove = False
