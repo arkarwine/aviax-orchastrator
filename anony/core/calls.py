@@ -362,14 +362,25 @@ class TgCall(PyTgCalls):
         for attempt in (1, 2):
             try:
                 async with self._assistant_operation(client):
-                    await asyncio.wait_for(
+                    play_task = asyncio.create_task(
                         client.play(
                             chat_id=chat_id,
                             stream=stream,
                             config=types.GroupCallConfig(auto_start=False),
-                        ),
-                        timeout=self.play_start_timeout,
+                        )
                     )
+                    try:
+                        await asyncio.wait_for(asyncio.shield(play_task), timeout=8)
+                    except asyncio.TimeoutError:
+                        await self._edit_playback_feedback(
+                            message,
+                            "⌛ <b>Still connecting to the voice chat...</b>\n\n"
+                            "Telegram is taking longer than usual to bind this stream. I am still waiting.",
+                        )
+                        await asyncio.wait_for(
+                            play_task,
+                            timeout=max(1, self.play_start_timeout - 8),
+                        )
                 return
             except asyncio.TimeoutError:
                 stage = "retrying" if attempt == 1 else "retry_failed"

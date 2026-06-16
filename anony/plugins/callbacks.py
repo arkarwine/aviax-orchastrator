@@ -194,8 +194,18 @@ async def _controls(_, query: types.CallbackQuery):
         msg = await app.send_message(chat_id=chat_id, text=query.lang["play_next"])
         if not media.file_path:
             media.file_path = await yt.download(media.id, video=media.video)
+        if not media.file_path:
+            queue.remove_current_if(chat_id, media.queue_id)
+            return await msg.edit_text(
+                "❌ I could not download that queued track.\n\n"
+                "💡 I removed it from the front of the queue. Try another result or link."
+            )
         media.message_id = msg.id
-        return await anon.play_media(chat_id, msg, media)
+        try:
+            return await anon.play_media(chat_id, msg, media)
+        except Exception:
+            queue.remove_current_if(chat_id, media.queue_id)
+            raise
 
     elif action == "replay":
         media = queue.get_current(chat_id)

@@ -124,6 +124,7 @@ class YouTube:
         if self.api:
             if file_path := await self.api.download(video_id, video):
                 return file_path
+            logger.warning("NexGen API download unavailable for %s; falling back to yt-dlp.", video_id)
 
         url = self.base + video_id
         ext = "mp4" if video else "webm"
@@ -133,6 +134,16 @@ class YouTube:
 
         if Path(filename).exists():
             return filename
+        if not video:
+            cached = next(
+                (
+                    path for path in downloads_dir.glob(f"{video_id}.*")
+                    if path.suffix.lower() in {".webm", ".m4a", ".mp3", ".opus", ".ogg"}
+                ),
+                None,
+            )
+            if cached:
+                return str(cached)
 
         cookie = self.get_cookies()
         base_opts = {
@@ -155,18 +166,30 @@ class YouTube:
         else:
             ydl_opts = {
                 **base_opts,
-                "format": "bestaudio[ext=webm][acodec=opus]",
+                "format": "bestaudio[ext=webm][acodec=opus]/bestaudio[ext=webm]/bestaudio/best",
             }
 
         def _download():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 try:
-                    ydl.download([url])
-                except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError):
+                    info = ydl.extract_info(url, download=True)
+                except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as exc:
+                    logger.warning("yt-dlp could not download %s: %s", video_id, exc)
                     return None
                 except Exception as ex:
                     logger.warning("Download failed: %s", ex)
                     return None
-            return filename
+                requested = info.get("requested_downloads") or []
+                for item in requested:
+                    filepath = item.get("filepath")
+                    if filepath and Path(filepath).exists():
+                        return filepath
+                filepath = info.get("filepath") or ydl.prepare_filename(info)
+                if filepath and Path(filepath).exists():
+                    return filepath
+            if Path(filename).exists():
+                return filename
+            cached = next(downloads_dir.glob(f"{video_id}.*"), None)
+            return str(cached) if cached else None
 
         return await asyncio.to_thread(_download)

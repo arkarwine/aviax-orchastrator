@@ -774,6 +774,18 @@ class BotManager:
         success, detail, _ = await self.request_runtime_control(deployment, "refresh_sudoers")
         return success, detail
 
+    async def update_running_deployment_sudoer(
+        self,
+        deployment: DeploymentMeta,
+        operation: str,
+        user_id: int,
+    ) -> tuple[bool, str, dict]:
+        return await self.request_runtime_control(
+            deployment,
+            operation,
+            {"user_id": user_id},
+        )
+
     def parse_bot_sudo_args(
         self,
         message: Message,
@@ -812,6 +824,25 @@ class BotManager:
             f"🛡️ Adding <code>{user_id}</code> to <b>{deployment.name}</b>...",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
+
+        runtime_success, runtime_detail, runtime_data = await self.update_running_deployment_sudoer(
+            deployment,
+            "add_sudoer",
+            user_id,
+        )
+        if runtime_success:
+            label = (
+                f"<b>{html.escape(user.first_name or str(user_id))}</b> (<code>{user_id}</code>)"
+                if user
+                else f"<code>{user_id}</code>"
+            )
+            await status.edit_text(
+                f"✅ {label} was added to <b>{deployment.name}</b>.\n\n"
+                "💾 Saved through the running deployed bot's active database, so it will persist across restarts.\n"
+                f"⚡ {runtime_detail}."
+            )
+            return
+
         mongo = None
         try:
             mongo, database, _ = self.deployment_database(deployment)
@@ -836,8 +867,9 @@ class BotManager:
             if user
             else f"<code>{user_id}</code>"
         )
-        state = "already had sudo access" if not result.modified_count else "was added"
-        if result.modified_count:
+        changed = bool(result.modified_count or result.upserted_id)
+        state = "was added" if changed else "already had sudo access"
+        if changed:
             await status.edit_text(
                 f"✅ {label} {state} on <b>{deployment.name}</b>.\n\n"
                 "⚡ Applying the updated access to the running bot..."
@@ -868,6 +900,20 @@ class BotManager:
             f"🚫 Removing <code>{user_id}</code> from <b>{deployment.name}</b>...",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
+
+        runtime_success, runtime_detail, _ = await self.update_running_deployment_sudoer(
+            deployment,
+            "del_sudoer",
+            user_id,
+        )
+        if runtime_success:
+            await status.edit_text(
+                f"✅ <code>{user_id}</code> was removed from <b>{deployment.name}</b>.\n\n"
+                "💾 Saved through the running deployed bot's active database, so it will persist across restarts.\n"
+                f"⚡ {runtime_detail}."
+            )
+            return
+
         mongo = None
         try:
             mongo, database, env = self.deployment_database(deployment)

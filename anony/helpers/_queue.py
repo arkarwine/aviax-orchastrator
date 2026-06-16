@@ -313,6 +313,14 @@ class Queue:
             self.queues[chat_id].popleft()
             self.save_live()
 
+    def remove_current_if(self, chat_id: int, queue_id: str | None) -> bool:
+        """Remove the current item only when it still matches the expected request."""
+        if self.queues[chat_id] and self.queues[chat_id][0].queue_id == queue_id:
+            self.queues[chat_id].popleft()
+            self.save_live()
+            return True
+        return False
+
     def clear(self, chat_id: int) -> None:
         """Clear the entire queue."""
         self.queues[chat_id].clear()

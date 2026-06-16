@@ -87,6 +87,26 @@ class HealthReporter:
                 "logging_disabled": bool(config.LOGGING_DISABLED),
             }
 
+        async def add_sudoer(payload: dict) -> dict:
+            user_id = int(payload.get("user_id") or 0)
+            if user_id <= 0:
+                raise ValueError("invalid sudo user id")
+            await db.add_sudo(user_id)
+            data = await refresh_sudoers()
+            data["user_id"] = user_id
+            return data
+
+        async def del_sudoer(payload: dict) -> dict:
+            user_id = int(payload.get("user_id") or 0)
+            if user_id <= 0:
+                raise ValueError("invalid sudo user id")
+            if app.owner and user_id == app.owner:
+                raise ValueError("owner cannot be removed from sudo access")
+            await db.del_sudo(user_id)
+            data = await refresh_sudoers()
+            data["user_id"] = user_id
+            return data
+
         async def broadcast_text(payload: dict) -> dict:
             from anony.plugins.broadcast import start_runtime_broadcast
 
@@ -100,6 +120,8 @@ class HealthReporter:
         handlers = {
             "refresh_sudoers": refresh_sudoers,
             "check_setup": check_setup,
+            "add_sudoer": add_sudoer,
+            "del_sudoer": del_sudoer,
             "broadcast_text": broadcast_text,
         }
         for request_path in Path.cwd().glob(".runtime-control-*.json"):
@@ -119,7 +141,11 @@ class HealthReporter:
                 payload = request.get("payload") or {}
                 result.update({
                     "success": True,
-                    "data": await handler(payload) if operation == "broadcast_text" else await handler(),
+                    "data": (
+                        await handler(payload)
+                        if operation in {"add_sudoer", "del_sudoer", "broadcast_text"}
+                        else await handler()
+                    ),
                 })
                 logger.info("Applied runtime control request %s operation=%s.", request_id, operation)
             except Exception as exc:

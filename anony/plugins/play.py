@@ -192,6 +192,10 @@ async def play_hndlr(
             track.requester_id = m.from_user.id
             track.queue_id = track.queue_id or uuid4().hex[:10]
 
+        if queue.get_queue(m.chat.id) and not await db.get_call(m.chat.id):
+            logger.warning("Clearing stale playback queue before new start chat=%s", m.chat.id)
+            queue.clear(m.chat.id)
+
         duplicate = queue.duplicate_position(m.chat.id, file.id)
         if duplicate >= 0 and not force:
             return await sent.edit_text(
@@ -386,6 +390,7 @@ async def play_hndlr(
                 logger.exception("Track download failed in chat %s", m.chat.id)
                 file.file_path = None
             if not file.file_path:
+                queue.remove_current_if(m.chat.id, file.queue_id)
                 return await sent.edit_text(
                     "❌ I found the track, but could not download it.\n\n"
                     "💡 The source may be restricted or temporarily unavailable. Try another result or link."
@@ -403,6 +408,7 @@ async def play_hndlr(
         return
     except Exception:
         logger.exception("Playback start failed in chat %s", m.chat.id)
+        queue.remove_current_if(m.chat.id, file.queue_id)
         return await sent.edit_text(
             "❌ The track is ready, but playback could not start.\n\n"
             "💡 Make sure the assistant is in the group, can join voice chats, and a voice chat is available."
