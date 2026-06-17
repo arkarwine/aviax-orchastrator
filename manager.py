@@ -35,6 +35,7 @@ STORE_PATH = ROOT / "manager_deployments.json"
 SUDO_STORE_PATH = ROOT / "manager_sudoers.json"
 BACKUP_STATE_PATH = ROOT / "manager_backup_state.json"
 AUDIT_LOG_PATH = ROOT / "manager_audit.jsonl"
+SCHEDULED_BROADCASTS_PATH = ROOT / "manager_scheduled_broadcasts.json"
 DEPLOYED_REFRESH_FALLBACK_NOTICE = (
     "⚡ <b>Activation required:</b> Have the deployed bot owner or an existing sudo user "
     "run <code>/refreshconfig</code> in that deployed bot's private chat. "
@@ -63,6 +64,7 @@ DEPLOYMENT_ENV_KEYS = {
     "VIDEO_API_URL",
     "API_KEY",
     "DOWNLOADS_PATH",
+    "COOKIES_PATH",
     "MAINTENANCE_GRACE_MINUTES",
     "USER_QUEUE_LIMIT",
     "AUTO_LEAVE",
@@ -191,6 +193,7 @@ class DeploymentMeta:
     restart_requested_by: Optional[int] = None
     pending_restart_reason: Optional[str] = None
     pending_restart_mode: str = "drain"
+    manager_sudoers: list[int] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -205,6 +208,14 @@ class DeploymentMeta:
         values.setdefault("restart_history", [])
         values.setdefault("pending_restart_reason", None)
         values.setdefault("pending_restart_mode", "drain")
+        values.setdefault("manager_sudoers", [])
+        values["manager_sudoers"] = sorted(
+            {
+                int(value)
+                for value in values.get("manager_sudoers", [])
+                if str(value).isdigit() and int(value) > 0
+            }
+        )
         return cls(**values)
 
     @property
@@ -291,6 +302,13 @@ class DeploymentStore:
             return dict(self.deployments)
 
 
+def resolve_manager_path(value: str) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return str(path.resolve())
+
+
 def normalize_name(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9_-]+", "_", value.strip().lower())
     return normalized.strip("_") or "bot"
@@ -326,6 +344,10 @@ def env_from_template(**values: str) -> Dict[str, str]:
             env[key] = default
     if values.get("downloads_path"):
         env["DOWNLOADS_PATH"] = values["downloads_path"]
+    if values.get("cookies_path"):
+        env["COOKIES_PATH"] = values["cookies_path"]
+    if values.get("cookies_url"):
+        env["COOKIES_URL"] = values["cookies_url"]
     if values.get("api_key"):
         env["API_KEY"] = values["api_key"]
     if values.get("owner_id"):
@@ -425,8 +447,10 @@ class BotManager:
         self.stale_health_counts: Dict[str, int] = {}
         self.recovering: set[str] = set()
         self.restarting: set[str] = set()
+        self.sudo_reconciled: set[str] = set()
         self.recovery_guard = threading.Lock()
         self.backup_lock = threading.Lock()
+        self.scheduled_broadcast_lock = threading.Lock()
         self.operations = DeploymentOperations()
         self.audit = AuditLog(AUDIT_LOG_PATH)
         self.recovery_backup = RecoveryBackup(
@@ -437,6 +461,7 @@ class BotManager:
             sudo_store_path=SUDO_STORE_PATH,
             audit_path=AUDIT_LOG_PATH,
             backup_state_path=BACKUP_STATE_PATH,
+            scheduled_broadcasts_path=SCHEDULED_BROADCASTS_PATH,
             load_env=self.load_deployment_env,
         )
         self.app = Client(
@@ -472,6 +497,9 @@ class BotManager:
         self.app.on_message(filters.private & filters.command(["delsudo", "rmsudo"]) & owner)(self.delsudo)
         self.app.on_message(filters.private & filters.command("backup") & owner)(self.backup)
         self.app.on_message(filters.private & filters.command("broadcast") & owner)(self.broadcast)
+        self.app.on_message(filters.private & filters.command(["schedulebroadcast", "schedulecast"]) & owner)(self.schedule_broadcast)
+        self.app.on_message(filters.private & filters.command(["scheduledbroadcasts", "broadcasts"]) & owner)(self.scheduled_broadcasts)
+        self.app.on_message(filters.private & filters.command(["cancelbroadcast", "cancelcast"]) & owner)(self.cancel_scheduled_broadcast)
         self.app.on_message(filters.private & filters.command("addbotsudo") & self.authorized_filter)(self.add_bot_sudo)
         self.app.on_message(filters.private & filters.command(["delbotsudo", "rmbotsudo"]) & self.authorized_filter)(self.del_bot_sudo)
         self.app.on_message(filters.private & filters.command("botsudolist") & self.authorized_filter)(self.bot_sudo_list)
@@ -489,7 +517,7 @@ class BotManager:
         await message.reply_text(
             "<b>🧰 Manager Commands</b>\n"
             "➕ /newbot &lt;name&gt; &lt;bot_token&gt; [owner_id] [database_name] - Create and start a deployment.\n"
-            "🧰 /reconfigure &lt;name&gt; &lt;bot_token&gt; [owner_id] - Reconfigure a deployment while preserving its database.\n"
+            "🧰 /reconfigure &lt;name&gt; [bot_token] [owner_id] - Reconfigure using the stored token unless a new one is provided.\n"
             "🗄️ /changedb &lt;name&gt; &lt;database_name&gt; - Switch a deployment to another database.\n"
             "📋 /list - Show all deployments.\n"
             "🔎 /status &lt;name&gt; - Show deployment status.\n"
@@ -503,7 +531,10 @@ class BotManager:
             "➕ /addsudo &lt;user_id&gt; - Grant manager access. Owner only.\n"
             "➖ /delsudo &lt;user_id&gt; - Remove manager access. Owner only.\n"
             "💾 /backup - Send a full disaster-recovery backup including databases. Owner only.\n"
-            "📣 /broadcast [-user] [-nochat] &lt;text&gt; - Broadcast through every running deployed bot. Owner only.\n"
+            "📣 /broadcast [-user] [-nochat] [-owners] &lt;text&gt; - Broadcast through deployed bots or directly to deployed owners. Owner only.\n"
+            "🕒 /schedulebroadcast &lt;time&gt; [-user] [-nochat] [-owners] &lt;text&gt; - Schedule a manager broadcast. Owner only.\n"
+            "📆 /scheduledbroadcasts - List pending scheduled broadcasts. Owner only.\n"
+            "✖️ /cancelbroadcast &lt;id&gt; - Cancel a scheduled broadcast. Owner only.\n"
             "🛡️ /addbotsudo &lt;deployment&gt; &lt;user_id&gt; - Add a deployed-bot sudo user and refresh it live.\n"
             "🚫 /delbotsudo &lt;deployment&gt; &lt;user_id&gt; - Remove a deployed-bot sudo user and refresh it live.\n"
             "👥 /botsudolist &lt;deployment&gt; - View a deployed bot's sudo users.\n",
@@ -606,6 +637,25 @@ class BotManager:
         mongo = AsyncMongoClient(mongo_url, serverSelectionTimeoutMS=12500)
         return mongo, mongo[db_name], env
 
+    async def deployed_owner_id(self, deployment: DeploymentMeta) -> tuple[Optional[int], str]:
+        mongo = None
+        try:
+            mongo, database, env = self.deployment_database(deployment)
+            runtime = await database.cache.find_one({"_id": "runtime_config"}) or {}
+            owner_id = int(runtime.get("settings", {}).get("OWNER_ID") or env.get("OWNER_ID") or 0)
+            return (owner_id if owner_id > 0 else None), "runtime config"
+        except Exception as exc:
+            logger.warning("Could not resolve owner for %s from database: %s", deployment.name, exc)
+            env = self.load_deployment_env(deployment.deployment_path / ".env")
+            try:
+                owner_id = int(env.get("OWNER_ID") or 0)
+            except (TypeError, ValueError):
+                owner_id = 0
+            return (owner_id if owner_id > 0 else None), "deployment .env"
+        finally:
+            if mongo is not None:
+                await mongo.close()
+
     async def request_runtime_control(
         self,
         deployment: DeploymentMeta,
@@ -693,14 +743,15 @@ class BotManager:
         command_text = parts[1].strip() if len(parts) > 1 else ""
         include_users = "-user" in command_text.split()
         exclude_groups = "-nochat" in command_text.split()
-        text = re.sub(r"(?<!\S)-(?:user|nochat)(?!\S)", "", command_text).strip()
+        owners_only = "-owners" in command_text.split()
+        text = re.sub(r"(?<!\S)-(?:user|nochat|owners)(?!\S)", "", command_text).strip()
         if message.reply_to_message:
             text = message.reply_to_message.text or message.reply_to_message.caption or text
         if not text:
             return await message.reply_text(
                 "📣 <b>Broadcast text is required.</b>\n\n"
                 "Reply to a text message or use:\n"
-                "<code>/broadcast [-user] [-nochat] your message</code>",
+                "<code>/broadcast [-user] [-nochat] [-owners] your message</code>",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
         if len(text) > 4096:
@@ -710,26 +761,218 @@ class BotManager:
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
+        status = await message.reply_text(
+            (
+                "📣 <b>Dispatching owner broadcast...</b>\n\n"
+                "👑 I will message the owners recorded for the deployed bots."
+                if owners_only
+                else
+                "📣 <b>Dispatching broadcast...</b>\n\n"
+                "⚡ Each healthy bot will begin delivering independently."
+            ),
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+        summary = await self.dispatch_broadcast_all(
+            text=text,
+            include_users=include_users,
+            exclude_groups=exclude_groups,
+            owners_only=owners_only,
+            requested_by=message.from_user.id,
+        )
+        await status.edit_text(summary)
+
+    def read_scheduled_broadcasts(self) -> list[dict]:
+        try:
+            data = json.loads(SCHEDULED_BROADCASTS_PATH.read_text(encoding="utf-8"))
+            return data.get("broadcasts", []) if isinstance(data, dict) else []
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            return []
+
+    def save_scheduled_broadcasts(self, broadcasts: list[dict]) -> None:
+        temporary = SCHEDULED_BROADCASTS_PATH.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps({"broadcasts": broadcasts}, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        temporary.replace(SCHEDULED_BROADCASTS_PATH)
+
+    @staticmethod
+    def format_run_at(value: str) -> str:
+        try:
+            return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return value
+
+    def parse_scheduled_broadcast(self, command_text: str) -> tuple[Optional[datetime], str, Optional[str]]:
+        command_text = command_text.strip()
+        relative = re.match(r"^in\s+(\d+)\s*([mhd])\b\s*(.*)$", command_text, re.I | re.S)
+        if relative:
+            amount = int(relative.group(1))
+            unit = relative.group(2).lower()
+            seconds = amount * {"m": 60, "h": 3600, "d": 86400}[unit]
+            if seconds < 60:
+                return None, "", "Use at least 1 minute for a scheduled broadcast."
+            return datetime.fromtimestamp(time.time() + seconds, timezone.utc), relative.group(3), None
+
+        absolute = re.match(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2})(?:\s+|$)(.*)$", command_text, re.S)
+        if absolute:
+            try:
+                local_time = datetime.strptime(absolute.group(1).replace("T", " "), "%Y-%m-%d %H:%M").astimezone()
+            except ValueError:
+                return None, "", "Use time as <code>YYYY-MM-DD HH:MM</code>."
+            return local_time.astimezone(timezone.utc), absolute.group(2), None
+        return None, "", (
+            "Use <code>in 30m</code>, <code>in 2h</code>, or "
+            "<code>YYYY-MM-DD HH:MM</code> before the message."
+        )
+
+    @handler_errors
+    async def schedule_broadcast(self, client: Client, message: Message) -> None:
+        parts = message.text.split(maxsplit=1)
+        run_at, remainder, error = self.parse_scheduled_broadcast(parts[1] if len(parts) > 1 else "")
+        if error:
+            return await message.reply_text(
+                "🕒 <b>Scheduled broadcast usage</b>\n\n"
+                "<code>/schedulebroadcast in 30m [-user] [-nochat] [-owners] message</code>\n"
+                "<code>/schedulebroadcast 2026-06-16 21:30 [-user] [-nochat] [-owners] message</code>\n\n"
+                f"💡 {error}",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        include_users = "-user" in remainder.split()
+        exclude_groups = "-nochat" in remainder.split()
+        owners_only = "-owners" in remainder.split()
+        text = re.sub(r"(?<!\S)-(?:user|nochat|owners)(?!\S)", "", remainder).strip()
+        if message.reply_to_message:
+            text = message.reply_to_message.text or message.reply_to_message.caption or text
+        if not text:
+            return await message.reply_text(
+                "📣 <b>Broadcast text is required.</b>\n\n"
+                "Reply to a text message or include text after the scheduled time.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        if len(text) > 4096:
+            return await message.reply_text(
+                "❌ <b>The broadcast is too long.</b>\n\n"
+                "💡 Keep the message within Telegram's 4096-character text limit.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        if run_at <= datetime.now(timezone.utc):
+            return await message.reply_text(
+                "❌ <b>The scheduled time is already past.</b>",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        item = {
+            "id": uuid.uuid4().hex[:8],
+            "run_at": run_at.isoformat(),
+            "text": text,
+            "include_users": include_users,
+            "exclude_groups": exclude_groups,
+            "owners_only": owners_only,
+            "requested_by": message.from_user.id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with self.scheduled_broadcast_lock:
+            broadcasts = self.read_scheduled_broadcasts()
+            broadcasts.append(item)
+            broadcasts.sort(key=lambda entry: entry.get("run_at", ""))
+            self.save_scheduled_broadcasts(broadcasts)
+        self.audit.record(
+            "schedule_broadcast",
+            issuer_id=message.from_user.id,
+            deployment="all",
+            result="scheduled",
+            detail=f"id={item['id']} run_at={item['run_at']}",
+        )
+        await message.reply_text(
+            f"✅ <b>Broadcast scheduled.</b>\n\n"
+            f"🆔 ID: <code>{item['id']}</code>\n"
+            f"🕒 Runs at: <code>{self.format_run_at(item['run_at'])}</code>\n"
+            f"👑 Owners only: <code>{'yes' if owners_only else 'no'}</code>\n"
+            f"👤 Include users: <code>{'yes' if include_users else 'no'}</code>\n"
+            f"👥 Include groups: <code>{'no' if exclude_groups else 'yes'}</code>",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+
+    @handler_errors
+    async def scheduled_broadcasts(self, client: Client, message: Message) -> None:
+        with self.scheduled_broadcast_lock:
+            broadcasts = self.read_scheduled_broadcasts()
+        if not broadcasts:
+            return await message.reply_text("📭 No scheduled broadcasts.", reply_parameters=ReplyParameters(message_id=message.id))
+        lines = ["<b>📆 Scheduled Broadcasts</b>"]
+        for item in broadcasts[:20]:
+            preview = html.escape(item.get("text", "")[:60])
+            target = "owners" if item.get("owners_only") else "bot recipients"
+            lines.append(
+                f"\n🆔 <code>{item.get('id')}</code>\n"
+                f"🕒 <code>{self.format_run_at(item.get('run_at', ''))}</code>\n"
+                f"🎯 <code>{target}</code>\n"
+                f"📣 {preview}{'…' if len(item.get('text', '')) > 60 else ''}"
+            )
+        if len(broadcasts) > 20:
+            lines.append(f"\n…and <code>{len(broadcasts) - 20}</code> more.")
+        await message.reply_text("\n".join(lines), reply_parameters=ReplyParameters(message_id=message.id))
+
+    @handler_errors
+    async def cancel_scheduled_broadcast(self, client: Client, message: Message) -> None:
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            return await message.reply_text(
+                "✖️ Usage: <code>/cancelbroadcast &lt;scheduled_id&gt;</code>",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        target = args[1].strip()
+        with self.scheduled_broadcast_lock:
+            broadcasts = self.read_scheduled_broadcasts()
+            kept = [item for item in broadcasts if item.get("id") != target]
+            if len(kept) == len(broadcasts):
+                return await message.reply_text(
+                    f"📭 Scheduled broadcast <code>{html.escape(target)}</code> was not found.",
+                    reply_parameters=ReplyParameters(message_id=message.id),
+                )
+            self.save_scheduled_broadcasts(kept)
+        self.audit.record(
+            "cancel_scheduled_broadcast",
+            issuer_id=message.from_user.id,
+            deployment="all",
+            result="cancelled",
+            detail=target,
+        )
+        await message.reply_text(
+            f"✅ Cancelled scheduled broadcast <code>{html.escape(target)}</code>.",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+
+    async def dispatch_broadcast_all(
+        self,
+        *,
+        text: str,
+        include_users: bool,
+        exclude_groups: bool,
+        requested_by: int,
+        owners_only: bool = False,
+    ) -> str:
+        all_deployments = list(self.store.list().values())
+        if owners_only:
+            if not all_deployments:
+                return "📭 No deployments found."
+            return await self.dispatch_broadcast_to_deployed_owners(
+                all_deployments,
+                text=text,
+                requested_by=requested_by,
+            )
         deployments = [
             deployment for deployment in self.store.list().values()
             if deployment.desired_running and not deployment.intentionally_stopped
         ]
         if not deployments:
-            return await message.reply_text(
-                "📭 No deployed bots are currently expected to be running.",
-                reply_parameters=ReplyParameters(message_id=message.id),
-            )
-
-        status = await message.reply_text(
-            f"📣 <b>Dispatching broadcast to {len(deployments)} deployed bot(s)...</b>\n\n"
-            "⚡ Each healthy bot will begin delivering independently.",
-            reply_parameters=ReplyParameters(message_id=message.id),
-        )
+            return "📭 No deployed bots are currently expected to be running."
         payload = {
             "text": text,
             "include_users": include_users,
             "exclude_groups": exclude_groups,
-            "requested_by": message.from_user.id,
+            "requested_by": requested_by,
         }
         results = await asyncio.gather(
             *(
@@ -760,12 +1003,70 @@ class BotManager:
             )
         self.audit.record(
             "broadcast_all",
-            issuer_id=message.from_user.id,
+            issuer_id=requested_by,
             deployment="all",
             result="dispatched",
             detail=f"accepted={len(accepted)} rejected={len(rejected)} recipients={recipients}",
         )
-        await status.edit_text(summary)
+        return summary
+
+    async def dispatch_broadcast_to_deployed_owners(
+        self,
+        deployments: list[DeploymentMeta],
+        *,
+        text: str,
+        requested_by: int,
+    ) -> str:
+        owner_sources = await asyncio.gather(
+            *(self.deployed_owner_id(deployment) for deployment in deployments)
+        )
+        owner_map: dict[int, list[str]] = {}
+        missing = []
+        for deployment, (owner_id, source) in zip(deployments, owner_sources):
+            if owner_id:
+                owner_map.setdefault(owner_id, []).append(deployment.name)
+            else:
+                missing.append(f"{deployment.name}: no owner configured in {source}")
+
+        delivered = []
+        failed = []
+        for owner_id, names in owner_map.items():
+            owner_text = (
+                "📣 <b>Manager broadcast for your deployed bot"
+                + ("s" if len(names) > 1 else "")
+                + "</b>\n\n"
+                f"{text}\n\n"
+                "🤖 Related deployment"
+                + ("s" if len(names) > 1 else "")
+                + f": <code>{html.escape(', '.join(sorted(names)))}</code>"
+            )
+            try:
+                await self.app.send_message(owner_id, owner_text)
+                delivered.append(owner_id)
+            except Exception as exc:
+                logger.warning("Could not deliver owner broadcast to %s: %s", owner_id, exc)
+                failed.append(f"{owner_id}: {type(exc).__name__}")
+
+        summary = (
+            "✅ <b>Owner broadcast processed.</b>\n\n"
+            f"👑 Unique owners found: <code>{len(owner_map)}</code>\n"
+            f"📬 Delivered: <code>{len(delivered)}</code>\n"
+            f"⚠️ Failed: <code>{len(failed)}</code>\n"
+            f"📭 Missing owner config: <code>{len(missing)}</code>"
+        )
+        warnings = failed + missing
+        if warnings:
+            summary += "\n\n⚠️ <b>Attention</b>\n" + "\n".join(
+                f"• <code>{html.escape(item)}</code>" for item in warnings[:15]
+            )
+        self.audit.record(
+            "broadcast_owners",
+            issuer_id=requested_by,
+            deployment="all",
+            result="dispatched",
+            detail=f"owners={len(owner_map)} delivered={len(delivered)} failed={len(failed)} missing={len(missing)}",
+        )
+        return summary
 
     async def refresh_deployment_sudoers(
         self,
@@ -773,6 +1074,51 @@ class BotManager:
     ) -> tuple[bool, str]:
         success, detail, _ = await self.request_runtime_control(deployment, "refresh_sudoers")
         return success, detail
+
+    async def reconcile_manager_sudoers(
+        self,
+        deployment: DeploymentMeta,
+    ) -> tuple[bool, str]:
+        desired = sorted(
+            {
+                int(value)
+                for value in deployment.manager_sudoers
+                if str(value).isdigit() and int(value) > 0
+            }
+        )
+        if desired != deployment.manager_sudoers:
+            deployment.manager_sudoers = desired
+            self.store.update(deployment)
+        if not desired:
+            return True, "no manager-managed sudo users to reconcile"
+
+        mongo = None
+        try:
+            mongo, database, _ = self.deployment_database(deployment)
+            await mongo.admin.command("ping")
+            result = await database.cache.update_one(
+                {"_id": "sudoers"},
+                {"$addToSet": {"user_ids": {"$each": desired}}},
+                upsert=True,
+            )
+        except Exception as exc:
+            logger.warning("Could not reconcile manager sudoers for %s: %s", deployment.name, exc)
+            return False, "the deployment database could not be updated"
+        finally:
+            if mongo is not None:
+                await mongo.close()
+
+        refreshed, refresh_detail = await self.refresh_deployment_sudoers(deployment)
+        changed = bool(result.modified_count or result.upserted_id)
+        if refreshed:
+            return True, (
+                f"{len(desired)} manager-managed sudo user(s) verified"
+                + (" and restored" if changed else "")
+            )
+        return False, (
+            f"{len(desired)} manager-managed sudo user(s) were saved in Mongo, "
+            f"but live refresh was unavailable because {refresh_detail}"
+        )
 
     async def update_running_deployment_sudoer(
         self,
@@ -831,15 +1177,26 @@ class BotManager:
             user_id,
         )
         if runtime_success:
+            if user_id not in deployment.manager_sudoers:
+                deployment.manager_sudoers.append(user_id)
+                deployment.manager_sudoers.sort()
+                self.store.update(deployment)
+            reconciled, reconcile_detail = await self.reconcile_manager_sudoers(deployment)
             label = (
                 f"<b>{html.escape(user.first_name or str(user_id))}</b> (<code>{user_id}</code>)"
                 if user
                 else f"<code>{user_id}</code>"
             )
+            persistence = (
+                f"🧷 Manager persistence check: {reconcile_detail}."
+                if reconciled
+                else f"⚠️ Manager persistence check failed: {reconcile_detail}."
+            )
             await status.edit_text(
                 f"✅ {label} was added to <b>{deployment.name}</b>.\n\n"
                 "💾 Saved through the running deployed bot's active database, so it will persist across restarts.\n"
-                f"⚡ {runtime_detail}."
+                f"⚡ {runtime_detail}.\n"
+                f"{persistence}"
             )
             return
 
@@ -868,6 +1225,10 @@ class BotManager:
             else f"<code>{user_id}</code>"
         )
         changed = bool(result.modified_count or result.upserted_id)
+        if user_id not in deployment.manager_sudoers:
+            deployment.manager_sudoers.append(user_id)
+            deployment.manager_sudoers.sort()
+            self.store.update(deployment)
         state = "was added" if changed else "already had sudo access"
         if changed:
             await status.edit_text(
@@ -907,6 +1268,9 @@ class BotManager:
             user_id,
         )
         if runtime_success:
+            if user_id in deployment.manager_sudoers:
+                deployment.manager_sudoers = [value for value in deployment.manager_sudoers if value != user_id]
+                self.store.update(deployment)
             await status.edit_text(
                 f"✅ <code>{user_id}</code> was removed from <b>{deployment.name}</b>.\n\n"
                 "💾 Saved through the running deployed bot's active database, so it will persist across restarts.\n"
@@ -944,6 +1308,9 @@ class BotManager:
                 await mongo.close()
 
         state = "was removed" if result.modified_count else "was not in the sudo list"
+        if user_id in deployment.manager_sudoers:
+            deployment.manager_sudoers = [value for value in deployment.manager_sudoers if value != user_id]
+            self.store.update(deployment)
         if result.modified_count:
             await status.edit_text(
                 f"✅ <code>{user_id}</code> {state} on <b>{deployment.name}</b>.\n\n"
@@ -982,6 +1349,16 @@ class BotManager:
             f"👥 Loading sudo users for <b>{name}</b>...",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
+        reconcile_note = ""
+        if deployment.manager_sudoers:
+            await status.edit_text(f"🧷 Verifying manager-managed sudo users for <b>{name}</b>...")
+            reconciled, reconcile_detail = await self.reconcile_manager_sudoers(deployment)
+            reconcile_note = (
+                f"\n🧷 Manager-managed sudoers: <code>{html.escape(reconcile_detail)}</code>"
+                if reconciled
+                else f"\n⚠️ Manager-managed sudoers: <code>{html.escape(reconcile_detail)}</code>"
+            )
+            await status.edit_text(f"👥 Loading sudo users for <b>{name}</b>...")
         mongo = None
         try:
             mongo, database, env = self.deployment_database(deployment)
@@ -1019,6 +1396,13 @@ class BotManager:
             lines.extend(f"• <code>{user_id}</code>" for user_id in additional)
         else:
             lines.append("\n📭 No additional sudo users.")
+        if deployment.manager_sudoers:
+            lines.append(
+                "\n<b>🧷 Manager-managed</b>\n"
+                + "\n".join(f"• <code>{user_id}</code>" for user_id in deployment.manager_sudoers)
+            )
+        if reconcile_note:
+            lines.append(reconcile_note)
         await status.edit_text("\n".join(lines))
 
     async def create_backup_archive(self) -> Path:
@@ -1166,7 +1550,8 @@ class BotManager:
             f"Desired: <code>{'running' if deployment.desired_running else 'stopped'}</code>\n"
             f"Created: {deployment.created_at}\n"
             f"Started: {deployment.started_at or 'never'}\n"
-            f"Path: <code>{deployment.deployment_path}</code>"
+            f"Path: <code>{deployment.deployment_path}</code>\n"
+            f"Manager-managed sudoers: <code>{len(deployment.manager_sudoers)}</code>"
         )
         if health:
             try:
@@ -1826,10 +2211,11 @@ class BotManager:
         env_path = deployment_dir / ".env"
         manager_downloads_path = os.getenv("MANAGER_DOWNLOADS_PATH", "")
         if manager_downloads_path:
-            downloads_path = Path(manager_downloads_path).expanduser()
-            if not downloads_path.is_absolute():
-                downloads_path = ROOT / downloads_path
-            manager_downloads_path = str(downloads_path.resolve())
+            manager_downloads_path = resolve_manager_path(manager_downloads_path)
+        manager_cookies_path = os.getenv("MANAGER_COOKIES_PATH", "")
+        if manager_cookies_path:
+            manager_cookies_path = resolve_manager_path(manager_cookies_path)
+        manager_cookies_url = os.getenv("MANAGER_COOKIES_URL", "")
 
         deployment_id = uuid.uuid4().hex
         db_name = requested_db_name or normalize_name(f"{name}_{bot_user.id}_{deployment_id[:8]}")
@@ -1845,6 +2231,8 @@ class BotManager:
             api_url=os.getenv("DEFAULT_API_URL", ""),
             video_api_url=os.getenv("DEFAULT_VIDEO_API_URL", ""),
             downloads_path=manager_downloads_path,
+            cookies_path=manager_cookies_path,
+            cookies_url=manager_cookies_url,
             api_key=self.config.api_key,
             owner_id=owner_id,
         )
@@ -1890,16 +2278,31 @@ class BotManager:
     @deployment_operation("reconfigure")
     async def reconfigure(self, client: Client, message: Message) -> None:
         args = message.text.split(maxsplit=3)
-        if len(args) < 3:
+        if len(args) < 2:
             return await message.reply_text(
-                "🧰 Usage: /reconfigure &lt;name&gt; &lt;bot_token&gt; [owner_id]\n\n"
+                "🧰 Usage: /reconfigure &lt;name&gt; [bot_token] [owner_id]\n\n"
+                "🔐 If no bot token is provided, I will reuse the token already stored in the deployment <code>.env</code>.\n"
                 "💾 The existing database, deployment identity, and stored bot setup will be preserved.",
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
         name = normalize_name(args[1])
-        bot_token = args[2].strip()
-        owner_id = args[3].strip() if len(args) > 3 else ""
+        bot_token_override = ""
+        owner_id = ""
+        if len(args) > 2:
+            first_value = args[2].strip()
+            if re.fullmatch(r"\d+:[A-Za-z0-9_-]{20,}", first_value):
+                bot_token_override = first_value
+                owner_id = args[3].strip() if len(args) > 3 else ""
+            else:
+                owner_id = first_value
+                if len(args) > 3:
+                    return await message.reply_text(
+                        "❌ I could not understand those arguments.\n\n"
+                        "💡 Use <code>/reconfigure &lt;name&gt; [owner_id]</code> to reuse the stored token, "
+                        "or <code>/reconfigure &lt;name&gt; &lt;bot_token&gt; [owner_id]</code> to replace it.",
+                        reply_parameters=ReplyParameters(message_id=message.id),
+                    )
         deployment = self.store.get(name)
         if not deployment:
             return await message.reply_text(
@@ -1926,31 +2329,42 @@ class BotManager:
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
 
+        env_path = deployment.deployment_path / ".env"
+        if not env_path.exists():
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> is missing its <code>.env</code> file.\n\n"
+                "💡 Restore the deployment files before reconfiguring it. Its database was not changed.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        env_vars = self.load_deployment_env(env_path)
+        bot_token = bot_token_override or env_vars.get("BOT_TOKEN", "").strip()
+        if not bot_token:
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> does not have a stored bot token.\n\n"
+                "💡 Re-run the command with a token once: "
+                f"<code>/reconfigure {name} &lt;bot_token&gt;</code>.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        mongo_url = env_vars.get("MONGO_URL")
+        if not mongo_url:
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> does not have a stored MongoDB connection.\n\n"
+                "💡 Restore <code>MONGO_URL</code> in its <code>.env</code>, then try again. Its database was not changed.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
         status = await message.reply_text(
-            f"🔎 Verifying the new bot token for <b>{name}</b>...",
+            f"🔎 Verifying the {'new' if bot_token_override else 'stored'} bot token for <b>{name}</b>...",
             reply_parameters=ReplyParameters(message_id=message.id),
         )
         try:
             bot_user = await self.verify_bot_token(bot_token)
         except Exception:
-            logger.exception("Replacement bot token verification failed for %s", name)
+            logger.exception("Bot token verification failed for %s", name)
             return await status.edit_text(
                 "❌ I could not verify that bot token.\n\n"
-                "💡 Copy a fresh token from @BotFather, make sure it belongs to a bot, then try again."
-            )
-
-        env_path = deployment.deployment_path / ".env"
-        if not env_path.exists():
-            return await status.edit_text(
-                f"❌ Deployment <b>{name}</b> is missing its <code>.env</code> file.\n\n"
-                "💡 Restore the deployment files before reconfiguring it. Its database was not changed."
-            )
-        env_vars = self.load_deployment_env(env_path)
-        mongo_url = env_vars.get("MONGO_URL")
-        if not mongo_url:
-            return await status.edit_text(
-                f"❌ Deployment <b>{name}</b> does not have a stored MongoDB connection.\n\n"
-                "💡 Restore <code>MONGO_URL</code> in its <code>.env</code>, then try again. Its database was not changed."
+                "💡 If this was the stored token, copy a fresh token from @BotFather and run "
+                f"<code>/reconfigure {name} &lt;bot_token&gt;</code> once."
             )
 
         await status.edit_text(f"⏹️ Stopping deployment <b>{name}</b> safely...")
@@ -2001,16 +2415,17 @@ class BotManager:
                 "💡 Check the deployment directory permissions and try again. Its database was not changed."
             )
 
-        await status.edit_text(f"🔐 Refreshing the bot login for <b>{name}</b>...")
-        try:
-            for filename in ("Anony.session", "Anony.session-journal"):
-                (deployment.deployment_path / filename).unlink(missing_ok=True)
-        except Exception:
-            logger.exception("Could not refresh bot login session for %s", name)
-            return await status.edit_text(
-                f"❌ Deployment <b>{name}</b> was updated, but its old bot login could not be cleared.\n\n"
-                "💡 Check the deployment directory permissions, then run <code>/reconfigure</code> again. Its database was not changed."
-            )
+        if bot_token_override:
+            await status.edit_text(f"🔐 Refreshing the bot login for <b>{name}</b>...")
+            try:
+                for filename in ("Anony.session", "Anony.session-journal"):
+                    (deployment.deployment_path / filename).unlink(missing_ok=True)
+            except Exception:
+                logger.exception("Could not refresh bot login session for %s", name)
+                return await status.edit_text(
+                    f"❌ Deployment <b>{name}</b> was updated, but its old bot login could not be cleared.\n\n"
+                    "💡 Check the deployment directory permissions, then run <code>/reconfigure</code> again. Its database was not changed."
+                )
 
         deployment.bot_id = bot_user.id
         deployment.username = f"@{bot_user.username}" if bot_user.username else bot_user.first_name
@@ -2554,7 +2969,7 @@ class BotManager:
 
     def sanitize_text(self, deployment: DeploymentMeta, text: str) -> str:
         env = self.load_deployment_env(deployment.deployment_path / ".env")
-        for key in ("BOT_TOKEN", "API_HASH", "API_KEY", "MONGO_URL", "SESSION", "SESSION1", "SESSION2", "SESSION3"):
+        for key in ("BOT_TOKEN", "API_HASH", "API_KEY", "MONGO_URL", "COOKIES_URL", "SESSION", "SESSION1", "SESSION2", "SESSION3"):
             secret = env.get(key)
             if secret:
                 text = text.replace(secret, "[REDACTED]")
@@ -2867,6 +3282,16 @@ class BotManager:
                     if state in {"healthy", "starting", "recovering"} or (
                         state == "stopped" and not deployment.desired_running
                     ):
+                        if state == "healthy" and deployment.manager_sudoers:
+                            reconcile_key = f"{deployment.name}:{deployment.process_created_at or deployment.pid or ''}"
+                            if reconcile_key not in self.sudo_reconciled:
+                                self.sudo_reconciled.add(reconcile_key)
+                                self._run_on_app_loop(self.reconcile_manager_sudoers, deployment)
+                        elif state not in {"starting", "recovering"}:
+                            self.sudo_reconciled = {
+                                key for key in self.sudo_reconciled
+                                if not key.startswith(f"{deployment.name}:")
+                            }
                         self.stale_health_counts.pop(deployment.name, None)
                         continue
                     confirmations = self.stale_health_counts.get(deployment.name, 0) + 1
@@ -2910,6 +3335,57 @@ class BotManager:
                 continue
             self._run_on_app_loop(self._send_scheduled_backup)
 
+    async def _dispatch_scheduled_broadcast(self, item: dict) -> None:
+        broadcast_id = item.get("id", "unknown")
+        await self._send_owner_with_retry(
+            f"📣 <b>Scheduled broadcast is starting.</b>\n\n"
+            f"🆔 ID: <code>{html.escape(str(broadcast_id))}</code>\n"
+            f"🕒 Scheduled for: <code>{self.format_run_at(item.get('run_at', ''))}</code>"
+        )
+        try:
+            summary = await self.dispatch_broadcast_all(
+                text=str(item.get("text") or ""),
+                include_users=bool(item.get("include_users")),
+                exclude_groups=bool(item.get("exclude_groups")),
+                owners_only=bool(item.get("owners_only")),
+                requested_by=int(item.get("requested_by") or self.config.owner_id),
+            )
+            await self._send_owner_with_retry(
+                f"✅ <b>Scheduled broadcast dispatched.</b>\n\n"
+                f"🆔 ID: <code>{html.escape(str(broadcast_id))}</code>\n\n"
+                f"{summary}"
+            )
+        except Exception as exc:
+            logger.exception("Scheduled broadcast %s failed.", broadcast_id)
+            await self._send_owner_with_retry(
+                f"❌ <b>Scheduled broadcast failed.</b>\n\n"
+                f"🆔 ID: <code>{html.escape(str(broadcast_id))}</code>\n"
+                f"Reason: <code>{html.escape(type(exc).__name__)}</code>"
+            )
+
+    def _scheduled_broadcast_loop(self) -> None:
+        logger.info("Scheduled broadcast dispatcher started.")
+        while not self.shutdown_event.wait(15):
+            now = datetime.now(timezone.utc)
+            due = []
+            with self.scheduled_broadcast_lock:
+                broadcasts = self.read_scheduled_broadcasts()
+                remaining = []
+                for item in broadcasts:
+                    try:
+                        run_at = datetime.fromisoformat(item.get("run_at", ""))
+                    except (TypeError, ValueError):
+                        logger.warning("Dropping invalid scheduled broadcast entry: %s", item)
+                        continue
+                    if run_at <= now:
+                        due.append(item)
+                    else:
+                        remaining.append(item)
+                if due:
+                    self.save_scheduled_broadcasts(remaining)
+            for item in due:
+                self._run_on_app_loop(self._dispatch_scheduled_broadcast, item)
+
     def start_process(
         self,
         deployment: DeploymentMeta,
@@ -2932,10 +3408,13 @@ class BotManager:
         env.update(deployment_env)
         manager_downloads_path = os.getenv("MANAGER_DOWNLOADS_PATH")
         if manager_downloads_path:
-            downloads_path = Path(manager_downloads_path).expanduser()
-            if not downloads_path.is_absolute():
-                downloads_path = ROOT / downloads_path
-            env["DOWNLOADS_PATH"] = str(downloads_path.resolve())
+            env["DOWNLOADS_PATH"] = resolve_manager_path(manager_downloads_path)
+        manager_cookies_path = os.getenv("MANAGER_COOKIES_PATH")
+        if manager_cookies_path:
+            env["COOKIES_PATH"] = resolve_manager_path(manager_cookies_path)
+        manager_cookies_url = os.getenv("MANAGER_COOKIES_URL")
+        if manager_cookies_url:
+            env["COOKIES_URL"] = manager_cookies_url
         if self.config.api_key:
             env["API_KEY"] = self.config.api_key
         env["PYTHONUNBUFFERED"] = "1"
@@ -3129,6 +3608,7 @@ class BotManager:
         signal.signal(signal.SIGTERM, self._shutdown_handler)
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.backup_thread = threading.Thread(target=self._backup_loop, daemon=True)
+        self.scheduled_broadcast_thread = threading.Thread(target=self._scheduled_broadcast_loop, daemon=True)
         try:
             # Start the bot client so the event loop is available for notifications
             self.app.start()
@@ -3136,6 +3616,7 @@ class BotManager:
             # start monitor thread after app started
             self.monitor_thread.start()
             self.backup_thread.start()
+            self.scheduled_broadcast_thread.start()
 
             # Block until stop signal; idle keeps the client running.
             idle()
@@ -3146,6 +3627,8 @@ class BotManager:
                 self.monitor_thread.join(timeout=2)
             if self.backup_thread.is_alive():
                 self.backup_thread.join(timeout=2)
+            if self.scheduled_broadcast_thread.is_alive():
+                self.scheduled_broadcast_thread.join(timeout=2)
             try:
                 self.app.stop()
             except Exception:

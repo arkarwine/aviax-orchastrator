@@ -23,7 +23,8 @@ class YouTube:
         self.base = "https://www.youtube.com/watch?v="
         self.cookies = []
         self.checked = False
-        self.cookie_dir = Path(__file__).resolve().parent.parent / "cookies"
+        self.default_cookie_dir = Path(__file__).resolve().parent.parent / "cookies"
+        self.cookie_dir = Path(config.COOKIES_PATH) if config.COOKIES_PATH else self.default_cookie_dir
         self.warned = False
         self.regex = re.compile(
             r"(https?://)?(www\.|m\.|music\.)?"
@@ -42,7 +43,16 @@ class YouTube:
                 config.VIDEO_API_URL
             )
 
+    def refresh_cookie_dir(self) -> None:
+        cookie_dir = Path(config.COOKIES_PATH) if config.COOKIES_PATH else self.default_cookie_dir
+        if cookie_dir != self.cookie_dir:
+            self.cookie_dir = cookie_dir
+            self.cookies.clear()
+            self.checked = False
+            self.warned = False
+
     def get_cookies(self):
+        self.refresh_cookie_dir()
         if not self.checked:
             if self.cookie_dir.exists():
                 for file in self.cookie_dir.iterdir():
@@ -57,6 +67,7 @@ class YouTube:
         return random.choice(self.cookies)
 
     async def save_cookies(self, urls: list[str]) -> None:
+        self.refresh_cookie_dir()
         logger.info("Saving cookies from urls...")
         self.cookie_dir.mkdir(parents=True, exist_ok=True)
         async with aiohttp.ClientSession() as session:
@@ -66,8 +77,10 @@ class YouTube:
                 async with session.get(link) as resp:
                     resp.raise_for_status()
                     path = self.cookie_dir / f"{name}.txt"
-                    with open(path, "wb") as fw:
+                    temporary = path.with_suffix(".txt.tmp")
+                    with open(temporary, "wb") as fw:
                         fw.write(await resp.read())
+                    temporary.replace(path)
         logger.info(f"Cookies saved in %s.", self.cookie_dir)
 
     def valid(self, url: str) -> bool:

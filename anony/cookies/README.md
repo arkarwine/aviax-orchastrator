@@ -12,3 +12,9 @@
     Local storage for cookies.<br>
     The file extension must be .txt and the cookie must be in <b>Netscape format.</b>
 </p>
+
+<p align="center">
+    For manager deployments, set <code>MANAGER_COOKIES_PATH</code> in <code>manager.env</code>
+    to share one cookie folder across every deployed bot. Optional batbin sources can be
+    shared with <code>MANAGER_COOKIES_URL</code>.
+</p>

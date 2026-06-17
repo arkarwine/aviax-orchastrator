@@ -131,6 +131,7 @@ class RecoveryBackup:
         sudo_store_path: Path,
         audit_path: Path,
         backup_state_path: Path,
+        scheduled_broadcasts_path: Path,
         load_env,
     ) -> None:
         self.root = root
@@ -140,6 +141,7 @@ class RecoveryBackup:
         self.sudo_store_path = sudo_store_path
         self.audit_path = audit_path
         self.backup_state_path = backup_state_path
+        self.scheduled_broadcasts_path = scheduled_broadcasts_path
         self.load_env = load_env
         self.last_database_errors: dict[str, str] = {}
 
@@ -151,6 +153,7 @@ class RecoveryBackup:
             (self.sudo_store_path, "manager_sudoers.json"),
             (self.audit_path, "manager_audit.jsonl"),
             (self.backup_state_path, "manager_backup_state.json"),
+            (self.scheduled_broadcasts_path, "manager_scheduled_broadcasts.json"),
         ):
             if path.is_file():
                 sources.append((path, archive_name))

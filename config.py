@@ -26,7 +26,7 @@ class Config:
         "BOT_TOKEN", "MONGO_URL", "OWNER_ID", "LOGGER_ID", "DURATION_LIMIT",
         "QUEUE_LIMIT", "PLAYLIST_LIMIT", "SESSION1", "SESSION2", "SESSION3",
         "MAINTENANCE_GRACE_MINUTES", "USER_QUEUE_LIMIT",
-        "SESSION_PATH", "DOWNLOADS_PATH", "SUPPORT_CHANNEL", "SUPPORT_CHAT", "OWNER_LINK",
+        "SESSION_PATH", "DOWNLOADS_PATH", "COOKIES_PATH", "SUPPORT_CHANNEL", "SUPPORT_CHAT", "OWNER_LINK",
         "API_URL", "VIDEO_API_URL", "API_KEY", "AUTO_LEAVE", "AUTO_END",
         "THUMB_GEN", "VIDEO_PLAY", "LANG_CODE", "COOKIES_URL", "DEFAULT_THUMB",
         "PING_IMG", "START_IMG",
@@ -62,6 +62,8 @@ class Config:
         self.SESSION_PATH = self.value("SESSION_PATH")
         downloads_path = self.value("DOWNLOADS_PATH", "")
         self.DOWNLOADS_PATH = Path(downloads_path).expanduser().resolve() if downloads_path else None
+        cookies_path = self.value("COOKIES_PATH", "")
+        self.COOKIES_PATH = Path(cookies_path).expanduser().resolve() if cookies_path else None
 
         self.SUPPORT_CHANNEL = self.value("SUPPORT_CHANNEL", "https://t.me/fallenx")
         self.SUPPORT_CHAT = self.value("SUPPORT_CHAT", "https://t.me/DevilsHeavenMF")
@@ -102,6 +104,7 @@ class Config:
             "OWNER_LINK": self.OWNER_LINK,
             "COOKIES_URL": self.COOKIES_URL,
             "DOWNLOADS_PATH": self.DOWNLOADS_PATH,
+            "COOKIES_PATH": self.COOKIES_PATH,
             "LOGGING_DISABLED": self.LOGGING_DISABLED,
             "DURATION_LIMIT": self.DURATION_LIMIT,
             "MAINTENANCE_GRACE_MINUTES": self.MAINTENANCE_GRACE_MINUTES,
@@ -153,8 +156,8 @@ class Config:
 
     def apply_runtime_config(self, config_values: dict) -> None:
         for key, value in config_values.items():
-            if key == "DOWNLOADS_PATH":
-                self.DOWNLOADS_PATH = Path(value).expanduser().resolve() if value else None
+            if key in {"DOWNLOADS_PATH", "COOKIES_PATH"}:
+                self.__dict__[key] = Path(value).expanduser().resolve() if value else None
             elif key == "COOKIES_URL":
                 if isinstance(value, str):
                     self.COOKIES_URL = [

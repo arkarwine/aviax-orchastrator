@@ -72,6 +72,7 @@ Manage keys from our official dashboard (no Telegram DMs needed):
 - 🔄 **Daily Reset**: All limits reset at midnight (IST).
 - 🎧🎬 **Audio + Video**: Fully supported via API (vPlay).
 - 🍪 **Fallback**: Add local **custom cookies** if you prefer not to use the API (works for both audio & video).
+- 🗂️ **Manager deployments**: Use `MANAGER_COOKIES_PATH` to centralize cookies for every deployed bot.
 - 💬 **Support**: Join the [API Community Group](https://t.me/+oH1cVV8YSsdhMWU5).
 
 ---

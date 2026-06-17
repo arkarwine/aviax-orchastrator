@@ -26,6 +26,8 @@ VALID_KEYS = [
     "PING_IMG",
     "START_IMG",
     "OWNER_LINK",
+    "COOKIES_URL",
+    "COOKIES_PATH",
     "DURATION_LIMIT",
     "MAINTENANCE_GRACE_MINUTES",
     "USER_QUEUE_LIMIT",
@@ -366,9 +368,10 @@ async def _refresh_config(_, m: types.Message):
                 logger.exception("Could not close previous API client")
                 subsystem_errors.append("previous API connection cleanup")
 
-        if "COOKIES_URL" in live_changes:
+        if {"COOKIES_URL", "COOKIES_PATH"} & set(live_changes):
             yt.cookies.clear()
             yt.warned = False
+            yt.refresh_cookie_dir()
             if config.COOKIES_URL:
                 try:
                     await yt.save_cookies(config.COOKIES_URL)
@@ -435,7 +438,9 @@ async def _settings(_, m: types.Message):
             "• default_thumb (image URL)\n"
             "• ping_img (image URL)\n"
             "• start_img (image URL)\n"
-            "• owner_link (Telegram profile or contact URL)\n\n"
+            "• owner_link (Telegram profile or contact URL)\n"
+            "• cookies_path (shared Netscape cookie folder)\n"
+            "• cookies_url (batbin cookie URL, space-separated for multiple)\n\n"
             "Use <code>/config &lt;key&gt; &lt;value&gt;</code> to update a setting.\n"
             "Use <code>/config &lt;key&gt;</code> to view the current value.\n\n"
             "Examples:\n"
@@ -445,7 +450,8 @@ async def _settings(_, m: types.Message):
             "<code>/config lang_code en</code>\n"
             "<code>/config default_thumb https://example.com/thumb.jpg</code>\n"
             "<code>/config ping_img https://example.com/ping.jpg</code>\n"
-            "<code>/config owner_link https://t.me/username</code>\n\n"
+            "<code>/config owner_link https://t.me/username</code>\n"
+            "<code>/config cookies_path /home/ubuntu/aviax-orchastrator/cookies</code>\n\n"
             "Use <code>/changeowner &lt;user_id&gt;</code> to transfer ownership.\n\n"
             "Use <code>/refreshconfig</code> to reload the deployment <code>.env</code>, "
             "database overrides, and language files without restarting."
@@ -461,7 +467,7 @@ async def _settings(_, m: types.Message):
         )
     if key not in VALID_KEYS:
         return await m.reply_text(
-            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, duration_limit, maintenance_grace_minutes, user_queue_limit, lang_code, default_thumb, ping_img, start_img, owner_link"
+            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, duration_limit, maintenance_grace_minutes, user_queue_limit, lang_code, default_thumb, ping_img, start_img, owner_link, cookies_path, cookies_url"
         )
 
     if len(m.command) == 2:
@@ -521,6 +527,22 @@ async def _settings(_, m: types.Message):
 
     await db.set_config(key, value)
     config.apply_runtime_config({key: value})
+    if key in {"COOKIES_URL", "COOKIES_PATH"}:
+        yt.cookies.clear()
+        yt.warned = False
+        yt.refresh_cookie_dir()
+        if config.COOKIES_URL:
+            try:
+                await yt.save_cookies(config.COOKIES_URL)
+                yt.checked = False
+            except Exception:
+                logger.exception("Could not refresh cookie files from runtime config")
+                return await m.reply_text(
+                    "❌ Cookie setting was saved, but the cookie files could not be refreshed.\n\n"
+                    "💡 Check the URL/path and run <code>/refreshconfig</code> after fixing it."
+                )
+        else:
+            yt.checked = False
 
     await m.reply_text(
         f"✅ Updated <code>{key}</code>.\n"
@@ -603,6 +625,7 @@ async def _reset_setting(_, m: types.Message):
     valid_keys = {
         "AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY",
         "LANG_CODE", "DEFAULT_THUMB", "PING_IMG", "START_IMG", "OWNER_LINK",
+        "COOKIES_URL", "COOKIES_PATH",
         "DURATION_LIMIT",
         "MAINTENANCE_GRACE_MINUTES",
         "USER_QUEUE_LIMIT",
@@ -610,7 +633,7 @@ async def _reset_setting(_, m: types.Message):
     
     if key not in valid_keys:
         return await m.reply_text(
-            "❌ Invalid setting key. Available keys: auto_leave, auto_end, thumb_gen, video_play, duration_limit, maintenance_grace_minutes, user_queue_limit, lang_code, default_thumb, ping_img, start_img, owner_link"
+            "❌ Invalid setting key. Available keys: auto_leave, auto_end, thumb_gen, video_play, duration_limit, maintenance_grace_minutes, user_queue_limit, lang_code, default_thumb, ping_img, start_img, owner_link, cookies_path, cookies_url"
         )
     
     original_value = config._runtime_defaults.get(key)
@@ -620,6 +643,22 @@ async def _reset_setting(_, m: types.Message):
     
     # Update the live config
     config.apply_runtime_config({key: original_value})
+    if key in {"COOKIES_URL", "COOKIES_PATH"}:
+        yt.cookies.clear()
+        yt.warned = False
+        yt.refresh_cookie_dir()
+        if config.COOKIES_URL:
+            try:
+                await yt.save_cookies(config.COOKIES_URL)
+                yt.checked = False
+            except Exception:
+                logger.exception("Could not refresh cookie files after reset")
+                return await m.reply_text(
+                    "❌ Setting was reset, but the cookie files could not be refreshed.\n\n"
+                    "💡 Check the default cookie path/URL and run <code>/refreshconfig</code>."
+                )
+        else:
+            yt.checked = False
     
     display_value = (
         f"{int(original_value) // 60} minutes"
