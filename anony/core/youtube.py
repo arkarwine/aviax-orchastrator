@@ -170,13 +170,15 @@ class YouTube:
             "cookiefile": cookie,
             "remote_components": {
                 "ejs": "github"
-            },
+            },    "js_runtimes": {        # ADD THIS
+        "deno": {}
+    },
         }
 
         if video:
             ydl_opts = {
                 **base_opts,
-                "format": "(bestvideo[height<=?720][width<=?1280][ext=mp4])+(bestaudio)",
+                "format": "bestvideo[height<=?720][width<=?1280][ext=mp4]+bestaudio/bestvideo[height<=?720]+bestaudio/best[ext=mp4]/best",
                 "merge_output_format": "mp4",
             }
         else:
