@@ -181,6 +181,8 @@ class YouTube:
                 **base_opts,
                 "format": "bestaudio[ext=webm][acodec=opus]/bestaudio[ext=webm]/bestaudio/best",
             }
+            
+        logger.warning("ydl_opts repr: %s", repr(ydl_opts))
 
         script = f"""
 import yt_dlp
@@ -204,13 +206,22 @@ raise SystemExit(1)
 """
 
         def _download():
-            import subprocess, sys
+            import subprocess, sys, os, resource
+
+            def close_fds():
+                maxfd = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+                os.closerange(3, maxfd)
+
+            env = os.environ.copy()
+            env.pop("NODE_CHANNEL_FD", None)
             try:
                 result = subprocess.run(
                     [sys.executable, "-c", script],
                     capture_output=True,
                     text=True,
                     timeout=300,
+                    env=env,
+                    preexec_fn=close_fds,  # ← close all inherited fds before exec
                 )
                 if result.returncode == 0:
                     filepath = result.stdout.strip()
