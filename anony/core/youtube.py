@@ -182,24 +182,47 @@ class YouTube:
                 "format": "bestaudio[ext=webm][acodec=opus]/bestaudio[ext=webm]/bestaudio/best",
             }
 
+        script = f"""
+import yt_dlp
+from pathlib import Path
+
+ydl_opts = {repr(ydl_opts)}
+
+with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    info = ydl.extract_info({repr(url)}, download=True)
+    requested = info.get("requested_downloads") or []
+    for item in requested:
+        filepath = item.get("filepath")
+        if filepath and Path(filepath).exists():
+            print(filepath)
+            raise SystemExit(0)
+    filepath = info.get("filepath") or ydl.prepare_filename(info)
+    if filepath and Path(filepath).exists():
+        print(filepath)
+        raise SystemExit(0)
+raise SystemExit(1)
+"""
+
         def _download():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                try:
-                    info = ydl.extract_info(url, download=True)
-                except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as exc:
-                    logger.warning("yt-dlp could not download %s: %s", video_id, exc)
-                    return None
-                except Exception as ex:
-                    logger.warning("Download failed: %s", ex)
-                    return None
-                requested = info.get("requested_downloads") or []
-                for item in requested:
-                    filepath = item.get("filepath")
+            import subprocess, sys
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-c", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                if result.returncode == 0:
+                    filepath = result.stdout.strip()
                     if filepath and Path(filepath).exists():
                         return filepath
-                filepath = info.get("filepath") or ydl.prepare_filename(info)
-                if filepath and Path(filepath).exists():
-                    return filepath
+                if result.stderr:
+                    logger.warning("yt-dlp subprocess error for %s: %s", video_id, result.stderr[-500:])
+            except subprocess.TimeoutExpired:
+                logger.warning("yt-dlp download timed out for %s", video_id)
+            except Exception as ex:
+                logger.warning("Download subprocess failed: %s", ex)
+
             if Path(filename).exists():
                 return filename
             cached = next(downloads_dir.glob(f"{video_id}.*"), None)
