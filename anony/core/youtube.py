@@ -171,9 +171,6 @@ class YouTube:
             "remote_components": {
                 "ejs": "github"
             },
-            "js_runtimes": {
-                "deno": {}
-            }
         }
 
         if video:
@@ -193,6 +190,7 @@ class YouTube:
                 try:
                     info = ydl.extract_info(url, download=True)
                 except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError) as exc:
+                    
                     logger.warning("yt-dlp could not download %s: %s", video_id, exc)
                     return None
                 except Exception as ex:
