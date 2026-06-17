@@ -168,9 +168,12 @@ class YouTube:
             "overwrites": False,
             "nocheckcertificate": True,
             "cookiefile": cookie,
-            'remote_components': {
-        'ejs': 'github' },
-            'js_runtimes': ['deno']
+            "remote_components": {
+                "ejs": "github"
+            },
+            "js_runtimes": {
+                "deno": {}
+            }
         }
 
         if video:
