@@ -10,17 +10,23 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from ntgcalls import (ConnectionNotFound, TelegramServerError,
-                      RTMPStreamingUnsupported, ConnectionError)
+from ntgcalls import (
+    ConnectionError,
+    ConnectionNotFound,
+    RTMPStreamingUnsupported,
+    TelegramServerError,
+)
 from pyrogram import raw
-from pyrogram.errors import (ChatSendMediaForbidden, ChatSendPhotosForbidden,
-                             MessageIdInvalid)
+from pyrogram.errors import (
+    ChatSendMediaForbidden,
+    ChatSendPhotosForbidden,
+    MessageIdInvalid,
+)
 from pyrogram.types import InputMediaAnimation, InputMediaPhoto, Message
 from pytgcalls import PyTgCalls, exceptions, types
 from pytgcalls.pytgcalls_session import PyTgCallsSession
 
-from anony import (app, config, db, lang, logger,
-                   queue, thumb, userbot, yt)
+from anony import app, config, db, lang, logger, queue, thumb, userbot, yt
 from anony.helpers import Media, Track, buttons
 
 
@@ -71,6 +77,44 @@ class TgCall(PyTgCalls):
         return self._restart_request
 
     @staticmethod
+    def _can_send_stream_audio(media: Media | Track) -> bool:
+        if getattr(media, "video", False):
+            return False
+        file_path = getattr(media, "file_path", None)
+        return bool(file_path and Path(file_path).is_file())
+
+    async def _send_stream_audio_copy(
+        self,
+        chat_id: int,
+        media: Media | Track,
+        *,
+        reply_to_message_id: int | None = None,
+    ) -> None:
+        if not self._can_send_stream_audio(media):
+            return
+
+        send_kwargs = {
+            "chat_id": chat_id,
+            "audio": str(media.file_path),
+            "title": media.title or Path(str(media.file_path)).stem,
+            "disable_notification": True,
+        }
+        if media.duration_sec > 0:
+            send_kwargs["duration"] = media.duration_sec
+        if reply_to_message_id:
+            send_kwargs["reply_to_message_id"] = reply_to_message_id
+
+        try:
+            await app.send_audio(**send_kwargs)
+        except Exception as exc:
+            logger.warning(
+                "Could not send streamed audio copy chat=%s media=%s: %s",
+                chat_id,
+                getattr(media, "id", "unknown"),
+                exc,
+            )
+
+    @staticmethod
     def _assistant_slot(client) -> int | str:
         return getattr(client, "session_slot", "unknown")
 
@@ -103,7 +147,9 @@ class TgCall(PyTgCalls):
             await db.playing(chat_id, paused=True)
             try:
                 async with self._assistant_operation(client):
-                    return await asyncio.wait_for(client.pause(chat_id), self.operation_timeout)
+                    return await asyncio.wait_for(
+                        client.pause(chat_id), self.operation_timeout
+                    )
             except asyncio.TimeoutError:
                 await db.playing(chat_id, paused=False)
                 logger.error("Voice call pause timed out chat=%s", chat_id)
@@ -115,7 +161,9 @@ class TgCall(PyTgCalls):
             await db.playing(chat_id, paused=False)
             try:
                 async with self._assistant_operation(client):
-                    return await asyncio.wait_for(client.resume(chat_id), self.operation_timeout)
+                    return await asyncio.wait_for(
+                        client.resume(chat_id), self.operation_timeout
+                    )
             except asyncio.TimeoutError:
                 await db.playing(chat_id, paused=True)
                 logger.error("Voice call resume timed out chat=%s", chat_id)
@@ -166,7 +214,6 @@ class TgCall(PyTgCalls):
             logger.debug("Could not preflight voice chat %s: %s", chat_id, exc)
             return assume_active_on_error
 
-
     async def play_media(
         self,
         chat_id: int,
@@ -213,7 +260,9 @@ class TgCall(PyTgCalls):
             if isinstance(media, Track):
                 thumb_task = asyncio.create_task(thumb.generate(media))
             else:
-                thumb_task = asyncio.create_task(asyncio.sleep(0, result=config.DEFAULT_THUMB))
+                thumb_task = asyncio.create_task(
+                    asyncio.sleep(0, result=config.DEFAULT_THUMB)
+                )
             thumb_task.add_done_callback(self._consume_background_exception)
         try:
             await self._edit_playback_feedback(
@@ -242,15 +291,22 @@ class TgCall(PyTgCalls):
                 _thumb = None
                 if thumb_task:
                     try:
-                        _thumb = await asyncio.wait_for(asyncio.shield(thumb_task), timeout=2)
+                        _thumb = await asyncio.wait_for(
+                            asyncio.shield(thumb_task), timeout=2
+                        )
                     except asyncio.TimeoutError:
                         logger.info(
-                            "Thumbnail generation still running after playback start chat=%s media=%s; using text now-playing.",
+                            "Thumbnail generation still running after playback start chat=%s media=%s; using text now-playing for now.",
                             chat_id,
                             media.id,
                         )
                     except Exception as exc:
-                        logger.warning("Thumbnail generation failed chat=%s media=%s: %s", chat_id, media.id, exc)
+                        logger.warning(
+                            "Thumbnail generation failed chat=%s media=%s: %s",
+                            chat_id,
+                            media.id,
+                            exc,
+                        )
                 try:
                     if _thumb:
                         input_media = (
@@ -264,7 +320,11 @@ class TgCall(PyTgCalls):
                         )
                     else:
                         await message.edit_text(text, reply_markup=keyboard)
-                except (ChatSendMediaForbidden, ChatSendPhotosForbidden, MessageIdInvalid):
+                except (
+                    ChatSendMediaForbidden,
+                    ChatSendPhotosForbidden,
+                    MessageIdInvalid,
+                ):
                     if _thumb:
                         if str(_thumb).lower().endswith(".gif"):
                             sent = await app.send_animation(
@@ -287,6 +347,32 @@ class TgCall(PyTgCalls):
                             reply_markup=keyboard,
                         )
                     media.message_id = sent.id
+
+                if thumb_task and not _thumb:
+                    late_thumb_task = asyncio.create_task(
+                        self._deliver_late_now_playing_media(
+                            chat_id,
+                            media,
+                            text,
+                            keyboard,
+                            thumb_task,
+                        ),
+                        name=f"late-thumb-{chat_id}-{getattr(media, 'id', 'unknown')}",
+                    )
+                    late_thumb_task.add_done_callback(
+                        self._consume_background_exception
+                    )
+
+                if self._can_send_stream_audio(media):
+                    audio_task = asyncio.create_task(
+                        self._send_stream_audio_copy(
+                            chat_id,
+                            media,
+                            reply_to_message_id=media.message_id or message.id,
+                        ),
+                        name=f"stream-audio-{chat_id}-{getattr(media, 'id', 'unknown')}",
+                    )
+                    audio_task.add_done_callback(self._consume_background_exception)
         except FileNotFoundError:
             await message.edit_text(_lang["error_no_file"].format(config.SUPPORT_CHAT))
             await self._play_next(chat_id)
@@ -323,9 +409,102 @@ class TgCall(PyTgCalls):
                     timeout=15,
                 )
         except (asyncio.TimeoutError, ConnectionNotFound, exceptions.NoActiveGroupCall):
-            logger.info("Stale playback cleanup completed with no active call chat=%s", chat_id)
+            logger.info(
+                "Stale playback cleanup completed with no active call chat=%s", chat_id
+            )
         except Exception as exc:
             logger.warning("Stale playback cleanup failed chat=%s: %s", chat_id, exc)
+
+    def _same_queue_item(
+        self, current: Media | Track | None, media: Media | Track
+    ) -> bool:
+        if not current:
+            return False
+        current_queue_id = getattr(current, "queue_id", None)
+        media_queue_id = getattr(media, "queue_id", None)
+        if current_queue_id and media_queue_id:
+            return current_queue_id == media_queue_id
+        return getattr(current, "id", None) == getattr(media, "id", None)
+
+    async def _deliver_late_now_playing_media(
+        self,
+        chat_id: int,
+        media: Media | Track,
+        text: str,
+        keyboard,
+        thumb_task: asyncio.Task,
+    ) -> None:
+        try:
+            thumb_path = await asyncio.shield(thumb_task)
+        except Exception as exc:
+            logger.warning(
+                "Deferred thumbnail generation failed chat=%s media=%s: %s",
+                chat_id,
+                getattr(media, "id", "unknown"),
+                exc,
+            )
+            return
+
+        if not thumb_path:
+            return
+
+        current = queue.get_current(chat_id)
+        if not self._same_queue_item(current, media):
+            return
+
+        message_id = getattr(current, "message_id", 0) or getattr(
+            media, "message_id", 0
+        )
+        if not message_id:
+            return
+
+        try:
+            target = await app.get_messages(chat_id, message_id)
+            input_media = (
+                InputMediaAnimation(media=thumb_path, caption=text)
+                if str(thumb_path).lower().endswith(".gif")
+                else InputMediaPhoto(media=thumb_path, caption=text)
+            )
+            await target.edit_media(media=input_media, reply_markup=keyboard)
+        except (
+            ChatSendMediaForbidden,
+            ChatSendPhotosForbidden,
+            MessageIdInvalid,
+        ):
+            try:
+                sent = (
+                    await app.send_animation(
+                        chat_id=chat_id,
+                        animation=thumb_path,
+                        caption=text,
+                        reply_markup=keyboard,
+                    )
+                    if str(thumb_path).lower().endswith(".gif")
+                    else await app.send_photo(
+                        chat_id=chat_id,
+                        photo=thumb_path,
+                        caption=text,
+                        reply_markup=keyboard,
+                    )
+                )
+                media.message_id = sent.id
+                current = queue.get_current(chat_id)
+                if self._same_queue_item(current, media):
+                    current.message_id = sent.id
+            except Exception as exc:
+                logger.warning(
+                    "Could not send deferred now-playing media chat=%s media=%s: %s",
+                    chat_id,
+                    getattr(media, "id", "unknown"),
+                    exc,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Could not apply deferred now-playing media chat=%s media=%s: %s",
+                chat_id,
+                getattr(media, "id", "unknown"),
+                exc,
+            )
 
     async def _edit_playback_feedback(self, message: Message, text: str) -> None:
         try:
@@ -347,11 +526,15 @@ class TgCall(PyTgCalls):
 
             health.write()
         except OSError as exc:
-            logger.warning("Could not immediately publish playback recovery heartbeat: %s", exc)
+            logger.warning(
+                "Could not immediately publish playback recovery heartbeat: %s", exc
+            )
         marker = Path.cwd() / ".restart-when-idle"
         temporary = marker.with_suffix(".tmp")
         try:
-            temporary.write_text(json.dumps(request, ensure_ascii=True), encoding="ascii")
+            temporary.write_text(
+                json.dumps(request, ensure_ascii=True), encoding="ascii"
+            )
             temporary.replace(marker)
         except OSError as exc:
             logger.error("Could not create playback recovery restart marker: %s", exc)
@@ -366,7 +549,9 @@ class TgCall(PyTgCalls):
                     "maintenance queue, and the deployment will restart for maintenance after other active streams finish.",
                 )
             except Exception as exc:
-                logger.warning("Could not notify owner about playback recovery: %s", exc)
+                logger.warning(
+                    "Could not notify owner about playback recovery: %s", exc
+                )
 
     async def _start_playback_with_recovery(
         self,
@@ -432,7 +617,6 @@ class TgCall(PyTgCalls):
                 )
                 raise PlaybackRecoveryQueued from None
 
-
     async def replay(self, chat_id: int) -> None:
         async with self._operation(chat_id, "replay"):
             try:
@@ -451,7 +635,6 @@ class TgCall(PyTgCalls):
         msg = await app.send_message(chat_id=chat_id, text=_lang["play_again"])
         media.message_id = msg.id
         await self._play_media(chat_id, msg, media)
-
 
     async def play_next(self, chat_id: int) -> None:
         async with self._operation(chat_id, "next"):
@@ -523,7 +706,9 @@ class TgCall(PyTgCalls):
                     queue.clear(chat_id)
             except Exception:
                 queue.clear(chat_id)
-                logger.exception("Could not restore maintenance queue for chat=%s", chat_id)
+                logger.exception(
+                    "Could not restore maintenance queue for chat=%s", chat_id
+                )
                 try:
                     await app.send_message(
                         chat_id,
@@ -605,7 +790,11 @@ class TgCall(PyTgCalls):
                     timeout=180,
                 )
             except asyncio.TimeoutError:
-                logger.error("Queued track download timed out chat=%s media=%s", chat_id, media.id)
+                logger.error(
+                    "Queued track download timed out chat=%s media=%s",
+                    chat_id,
+                    media.id,
+                )
                 media.file_path = None
             if not media.file_path:
                 await self._play_next(chat_id)
@@ -616,13 +805,11 @@ class TgCall(PyTgCalls):
         media.message_id = msg.id
         await self._play_media(chat_id, msg, media)
 
-
     async def ping(self) -> float:
         if not self.clients:
             return 0.0
         pings = [client.ping for client in self.clients]
         return round(sum(pings) / len(pings), 2)
-
 
     async def decorators(self, client: PyTgCalls) -> None:
         @client.on_update()
@@ -631,7 +818,10 @@ class TgCall(PyTgCalls):
                 if update.stream_type == types.StreamEnded.Type.AUDIO:
                     now = time.monotonic()
                     if now - self._last_stream_end.get(update.chat_id, 0) < 3:
-                        logger.debug("Ignoring duplicate stream-ended event chat=%s", update.chat_id)
+                        logger.debug(
+                            "Ignoring duplicate stream-ended event chat=%s",
+                            update.chat_id,
+                        )
                         return
                     self._last_stream_end[update.chat_id] = now
                     await self.play_next(update.chat_id)
@@ -642,7 +832,6 @@ class TgCall(PyTgCalls):
                     types.ChatUpdate.Status.CLOSED_VOICE_CHAT,
                 ]:
                     await self.stop(update.chat_id, leave_call=False)
-
 
     async def boot(self) -> None:
         PyTgCallsSession.notice_displayed = True
