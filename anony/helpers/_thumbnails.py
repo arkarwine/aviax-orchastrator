@@ -3,6 +3,7 @@
 # This file is part of AnonXMusic
 
 
+import asyncio
 import colorsys
 import math
 from pathlib import Path
@@ -198,16 +199,22 @@ class Thumbnail:
                 fill=(*color, 235),
             )
 
-    async def generate(self, song: Track, size=(1280, 720)) -> str:
+    async def generate(self, song: Track, size=(854, 480)) -> str:
         try:
             cache_dir = Path.cwd() / "cache"
             cache_dir.mkdir(parents=True, exist_ok=True)
             temp = cache_dir / f"temp_{song.id}.jpg"
-            output = cache_dir / f"{song.id}_nowplaying_v7.gif"
+            output = cache_dir / f"{song.id}_nowplaying_v8_480p.gif"
             if output.exists():
                 return str(output)
 
             await self.save_thumb(str(temp), song.thumbnail)
+            return await asyncio.to_thread(self._render_now_playing_gif, song, size, temp, output)
+        except Exception:
+            return config.DEFAULT_THUMB
+
+    def _render_now_playing_gif(self, song: Track, size, temp: Path, output: Path) -> str:
+        try:
             source = Image.open(temp).convert("RGB")
             scale = size[0] / 960
             point = lambda x, y: (round(x * scale), round(y * scale))

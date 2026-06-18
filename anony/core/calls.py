@@ -42,6 +42,15 @@ class TgCall(PyTgCalls):
         self.operation_timeout = 75
         self.play_start_timeout = 30
 
+    @staticmethod
+    def _consume_background_exception(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except Exception:
+            logger.debug("Background task exception was consumed.", exc_info=True)
+
     def active_operations(self) -> dict:
         now = time.monotonic()
         return {
@@ -143,14 +152,14 @@ class TgCall(PyTgCalls):
         self, chat_id: int, assume_active_on_error: bool = True
     ) -> bool:
         try:
-            peer = await asyncio.wait_for(app.resolve_peer(chat_id), timeout=30)
+            peer = await asyncio.wait_for(app.resolve_peer(chat_id), timeout=5)
             channel = raw.types.InputChannel(
                 channel_id=peer.channel_id,
                 access_hash=peer.access_hash,
             )
             full_chat = await asyncio.wait_for(
                 app.invoke(raw.functions.channels.GetFullChannel(channel=channel)),
-                timeout=30,
+                timeout=5,
             )
             return bool(getattr(full_chat.full_chat, "call", None))
         except Exception as exc:
@@ -177,17 +186,6 @@ class TgCall(PyTgCalls):
     ) -> None:
         client = await db.get_assistant(chat_id)
         _lang = await lang.get_lang(chat_id)
-        _thumb = None
-        if config.THUMB_GEN:
-            try:
-                _thumb = (
-                    await asyncio.wait_for(thumb.generate(media), timeout=20)
-                    if isinstance(media, Track)
-                    else config.DEFAULT_THUMB
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Thumbnail generation timed out chat=%s media=%s", chat_id, media.id)
-                _thumb = config.DEFAULT_THUMB
 
         if not media.file_path:
             await message.edit_text(_lang["error_no_file"].format(config.SUPPORT_CHAT))
@@ -210,6 +208,13 @@ class TgCall(PyTgCalls):
             ),
             ffmpeg_parameters=f"-ss {seek_time}" if seek_time > 1 else None,
         )
+        thumb_task = None
+        if config.THUMB_GEN:
+            if isinstance(media, Track):
+                thumb_task = asyncio.create_task(thumb.generate(media))
+            else:
+                thumb_task = asyncio.create_task(asyncio.sleep(0, result=config.DEFAULT_THUMB))
+            thumb_task.add_done_callback(self._consume_background_exception)
         try:
             await self._edit_playback_feedback(
                 message,
@@ -234,6 +239,18 @@ class TgCall(PyTgCalls):
                     f"📋 Queue: <code>{max(0, len(queue.get_queue(chat_id)) - 1)}</code> waiting"
                 )
                 keyboard = buttons.controls(chat_id)
+                _thumb = None
+                if thumb_task:
+                    try:
+                        _thumb = await asyncio.wait_for(asyncio.shield(thumb_task), timeout=2)
+                    except asyncio.TimeoutError:
+                        logger.info(
+                            "Thumbnail generation still running after playback start chat=%s media=%s; using text now-playing.",
+                            chat_id,
+                            media.id,
+                        )
+                    except Exception as exc:
+                        logger.warning("Thumbnail generation failed chat=%s media=%s: %s", chat_id, media.id, exc)
                 try:
                     if _thumb:
                         input_media = (
