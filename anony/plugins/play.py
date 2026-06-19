@@ -54,6 +54,37 @@ def format_wait(seconds: int) -> str:
     return f"about {minutes} minute{'s' if minutes != 1 else ''}"
 
 
+def can_send_song_file(media) -> bool:
+    if not media or getattr(media, "video", False):
+        return False
+    file_path = getattr(media, "file_path", None)
+    return bool(file_path and Path(file_path).is_file())
+
+
+async def send_song_file(
+    chat_id: int,
+    media,
+    *,
+    reply_to_message_id: int | None = None,
+) -> bool:
+    if not can_send_song_file(media):
+        return False
+
+    send_kwargs = {
+        "chat_id": chat_id,
+        "audio": str(media.file_path),
+        "title": media.title or Path(str(media.file_path)).stem,
+        "disable_notification": True,
+    }
+    if getattr(media, "duration_sec", 0) > 0:
+        send_kwargs["duration"] = media.duration_sec
+    if reply_to_message_id:
+        send_kwargs["reply_to_message_id"] = reply_to_message_id
+
+    await app.send_audio(**send_kwargs)
+    return True
+
+
 async def send_play_log_safely(
     m: types.Message,
     sent: types.Message,
@@ -70,9 +101,12 @@ async def send_play_log_safely(
             timeout=10,
         )
     except asyncio.TimeoutError:
-        logger.warning("Play log delivery timed out chat=%s; playback continued", m.chat.id)
+        logger.warning(
+            "Play log delivery timed out chat=%s; playback continued", m.chat.id
+        )
     except Exception as exc:
         logger.warning("Play log delivery failed chat=%s: %s", m.chat.id, exc)
+
 
 @app.on_message(
     filters.command(["play", "playforce", "vplay", "vplayforce"])
@@ -102,7 +136,9 @@ async def play_hndlr(
 
     if media:
         setattr(sent, "lang", m.lang)
-        await edit_status(sent, DOWNLOAD_CUSTOM, "⬇️", "Downloading the replied media...")
+        await edit_status(
+            sent, DOWNLOAD_CUSTOM, "⬇️", "Downloading the replied media..."
+        )
         try:
             file = await tg.download(m.reply_to_message, sent)
         except Exception:
@@ -127,9 +163,7 @@ async def play_hndlr(
         if "playlist" in url:
             await edit_status(sent, SEARCH_CUSTOM, "⌛", "Fetching the playlist...")
             try:
-                tracks = await yt.playlist(
-                    config.PLAYLIST_LIMIT, mention, url, video
-                )
+                tracks = await yt.playlist(config.PLAYLIST_LIMIT, mention, url, video)
             except Exception:
                 logger.exception("Playlist lookup failed in chat %s", m.chat.id)
                 tracks = []
@@ -144,7 +178,9 @@ async def play_hndlr(
             tracks.remove(file)
             file.message_id = sent.id
         else:
-            await edit_status(sent, SEARCH_CUSTOM, "🔎", "Checking the requested link...")
+            await edit_status(
+                sent, SEARCH_CUSTOM, "🔎", "Checking the requested link..."
+            )
             file = await yt.search(url, sent.id, video=video)
 
         if not file:
@@ -155,7 +191,9 @@ async def play_hndlr(
 
     elif len(m.command) >= 2:
         query = " ".join(m.command[1:])
-        await edit_status(sent, SEARCH_CUSTOM, "🔎", f"Searching for <b>{escape(query)}</b>...")
+        await edit_status(
+            sent, SEARCH_CUSTOM, "🔎", f"Searching for <b>{escape(query)}</b>..."
+        )
         file = await yt.search(query, sent.id, video=video)
         if not file:
             return await sent.edit_text(
@@ -193,7 +231,9 @@ async def play_hndlr(
             track.queue_id = track.queue_id or uuid4().hex[:10]
 
         if queue.get_queue(m.chat.id) and not await db.get_call(m.chat.id):
-            logger.warning("Clearing stale playback queue before new start chat=%s", m.chat.id)
+            logger.warning(
+                "Clearing stale playback queue before new start chat=%s", m.chat.id
+            )
             queue.clear(m.chat.id)
 
         duplicate = queue.duplicate_position(m.chat.id, file.id)
@@ -206,7 +246,11 @@ async def play_hndlr(
             )
 
         pending_by_user = queue.requester_pending_count(m.chat.id, m.from_user.id)
-        if pending_by_user >= config.USER_QUEUE_LIMIT and not force and m.from_user.id not in app.sudoers:
+        if (
+            pending_by_user >= config.USER_QUEUE_LIMIT
+            and not force
+            and m.from_user.id not in app.sudoers
+        ):
             return await sent.edit_text(
                 "⚖️ <b>Your personal queue limit is full.</b>\n\n"
                 f"You already have <code>{pending_by_user}</code> pending requests in this chat.\n"
@@ -233,7 +277,9 @@ async def play_hndlr(
         try:
             positions = queue.defer_many(m.chat.id, deferred)
         except TypeError:
-            logger.exception("Maintenance queue contains unsupported data chat=%s", m.chat.id)
+            logger.exception(
+                "Maintenance queue contains unsupported data chat=%s", m.chat.id
+            )
             return await sent.edit_text(
                 "❌ <b>I could not save this request because its track data is invalid.</b>\n\n"
                 "💡 Try the request again. If it repeats for this track, send its link to the bot owner."
@@ -366,7 +412,11 @@ async def play_hndlr(
             return
 
     if not file.file_path:
-        downloads_dir = Path(config.DOWNLOADS_PATH) if config.DOWNLOADS_PATH else Path.cwd() / "downloads"
+        downloads_dir = (
+            Path(config.DOWNLOADS_PATH)
+            if config.DOWNLOADS_PATH
+            else Path.cwd() / "downloads"
+        )
         downloads_dir.mkdir(parents=True, exist_ok=True)
         fname = downloads_dir / f"{file.id}.{'mp4' if video else 'webm'}"
         if fname.exists():
@@ -384,7 +434,9 @@ async def play_hndlr(
                     timeout=180,
                 )
             except asyncio.TimeoutError:
-                logger.warning("Track download timed out chat=%s media=%s", m.chat.id, file.id)
+                logger.warning(
+                    "Track download timed out chat=%s media=%s", m.chat.id, file.id
+                )
                 file.file_path = None
             except Exception:
                 logger.exception("Track download failed in chat %s", m.chat.id)
@@ -420,3 +472,46 @@ async def play_hndlr(
         chat_id=m.chat.id,
         text=m.lang["playlist_queued"].format(len(tracks)) + added,
     )
+
+
+@app.on_message(filters.command(["song"]) & filters.group & ~app.bl_users)
+@lang.language()
+async def song_hndlr(_, m: types.Message) -> None:
+    media = queue.get_current(m.chat.id)
+    if not media or not await db.get_call(m.chat.id):
+        return await m.reply_text("❌ No song is currently playing.")
+
+    if getattr(media, "video", False):
+        return await m.reply_text(
+            "❌ The current playback is a video stream, so there is no song file to send."
+        )
+
+    if not can_send_song_file(media):
+        if getattr(media, "file_path", None):
+            return await m.reply_text(
+                "❌ The current song file is no longer available on disk."
+            )
+        return await m.reply_text(
+            "❌ The current track is being streamed from a source that cannot be sent as a song file."
+        )
+
+    sent = await m.reply_text(
+        f"🎵 Sending <b>{escape(media.title or 'current song')}</b>..."
+    )
+    try:
+        await send_song_file(
+            m.chat.id,
+            media,
+            reply_to_message_id=m.id,
+        )
+    except Exception:
+        logger.exception(
+            "Could not send current song file chat=%s media=%s",
+            m.chat.id,
+            getattr(media, "id", "unknown"),
+        )
+        return await sent.edit_text(
+            "❌ I could not send the current song file. Please try again shortly."
+        )
+
+    await sent.delete()

@@ -8,7 +8,6 @@ import json
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from ntgcalls import (
     ConnectionError,
@@ -75,44 +74,6 @@ class TgCall(PyTgCalls):
 
     def restart_request(self) -> dict | None:
         return self._restart_request
-
-    @staticmethod
-    def _can_send_stream_audio(media: Media | Track) -> bool:
-        if getattr(media, "video", False):
-            return False
-        file_path = getattr(media, "file_path", None)
-        return bool(file_path and Path(file_path).is_file())
-
-    async def _send_stream_audio_copy(
-        self,
-        chat_id: int,
-        media: Media | Track,
-        *,
-        reply_to_message_id: int | None = None,
-    ) -> None:
-        if not self._can_send_stream_audio(media):
-            return
-
-        send_kwargs = {
-            "chat_id": chat_id,
-            "audio": str(media.file_path),
-            "title": media.title or Path(str(media.file_path)).stem,
-            "disable_notification": True,
-        }
-        if media.duration_sec > 0:
-            send_kwargs["duration"] = media.duration_sec
-        if reply_to_message_id:
-            send_kwargs["reply_to_message_id"] = reply_to_message_id
-
-        try:
-            await app.send_audio(**send_kwargs)
-        except Exception as exc:
-            logger.warning(
-                "Could not send streamed audio copy chat=%s media=%s: %s",
-                chat_id,
-                getattr(media, "id", "unknown"),
-                exc,
-            )
 
     @staticmethod
     def _assistant_slot(client) -> int | str:
@@ -363,16 +324,6 @@ class TgCall(PyTgCalls):
                         self._consume_background_exception
                     )
 
-                if self._can_send_stream_audio(media):
-                    audio_task = asyncio.create_task(
-                        self._send_stream_audio_copy(
-                            chat_id,
-                            media,
-                            reply_to_message_id=media.message_id or message.id,
-                        ),
-                        name=f"stream-audio-{chat_id}-{getattr(media, 'id', 'unknown')}",
-                    )
-                    audio_task.add_done_callback(self._consume_background_exception)
         except FileNotFoundError:
             await message.edit_text(_lang["error_no_file"].format(config.SUPPORT_CHAT))
             await self._play_next(chat_id)
