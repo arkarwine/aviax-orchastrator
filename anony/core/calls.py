@@ -8,6 +8,7 @@ import json
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from ntgcalls import (
     ConnectionError,
