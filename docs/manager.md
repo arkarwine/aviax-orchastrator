@@ -60,6 +60,8 @@ The ecosystem file sets `treekill: false`. This is required because PM2 otherwis
 
 Manager-authorized users can manage each deployed bot's sudo list directly with `/addbotsudo`, `/delbotsudo`, and `/botsudolist`.
 
+Scheduled broadcasts now live inside each deployed bot instead of the manager. Use the deployed bot's private `/schedulebroadcast`, `/scheduledbroadcasts`, and `/cancelbroadcast` commands.
+
 After `/addbotsudo` or `/delbotsudo`, the manager automatically asks a healthy running
 deployment to reload its sudo access and command menus. If the deployment is stopped,
 unhealthy, or does not confirm the refresh, the manager explains that `/refreshconfig`
@@ -120,7 +122,7 @@ After `/newbot`, setup happens inside the deployed bot:
 1. Send `/start` to the deployed bot in private chat to claim owner.
 2. Connect an assistant session with `/addsession` in private chat.
 3. Optionally create a log group, add the deployed bot, promote it as admin, then run `/setlog` in that group.
-4. Optionally set support group, updates channel, language, and more assistant sessions.
+4. Optionally set support group, updates channel, language, more assistant sessions, and scheduled text broadcasts from the deployed bot's private chat.
 
 The log group is optional. Missing access, removal from the group, or lost admin rights disables log delivery without preventing the bot or assistants from starting.
 

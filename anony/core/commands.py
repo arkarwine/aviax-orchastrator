@@ -7,7 +7,6 @@ from pyrogram import types
 
 from anony import app, logger
 
-
 PUBLIC_PRIVATE_COMMANDS = [
     ("start", "Open the music bot start menu"),
     ("help", "Browse the command reference"),
@@ -38,6 +37,9 @@ PUBLIC_GROUP_COMMANDS = [
 SUDO_PRIVATE_COMMANDS = PUBLIC_PRIVATE_COMMANDS + [
     ("activevc", "View active voice chats"),
     ("broadcast", "Broadcast a replied message"),
+    ("schedulebroadcast", "Schedule a text broadcast"),
+    ("scheduledbroadcasts", "View scheduled broadcasts"),
+    ("cancelbroadcast", "Cancel a scheduled broadcast"),
     ("stop_broadcast", "Cancel the active broadcast"),
     ("logs", "Download the bot log file"),
     ("logger", "Enable or disable activity logging"),
@@ -119,12 +121,16 @@ async def sync_command_menus(previous_privileged: set[int] | None = None) -> lis
         try:
             await set_user_command_menu(user_id, owner=user_id == app.owner)
         except Exception:
-            logger.exception("Could not register command menu for sudo user %s", user_id)
+            logger.exception(
+                "Could not register command menu for sudo user %s", user_id
+            )
             warnings.append(f"sudo menu {user_id}")
     for user_id in (previous_privileged or set()) - set(app.sudoers):
         try:
             await set_public_user_command_menu(user_id)
         except Exception:
-            logger.exception("Could not restore public command menu for user %s", user_id)
+            logger.exception(
+                "Could not restore public command menu for user %s", user_id
+            )
             warnings.append(f"public menu {user_id}")
     return warnings

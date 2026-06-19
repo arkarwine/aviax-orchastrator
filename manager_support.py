@@ -13,7 +13,6 @@ from typing import Iterator, Optional
 from bson import json_util
 from pymongo import AsyncMongoClient
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -101,7 +100,10 @@ async def export_mongo_database(
             documents = []
             async for document in database[collection_name].find({}):
                 documents.append(document)
-            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", collection_name).strip("._") or "collection"
+            safe_name = (
+                re.sub(r"[^A-Za-z0-9_.-]+", "_", collection_name).strip("._")
+                or "collection"
+            )
             output = destination / f"{safe_name}.json"
             output.write_text(
                 json_util.dumps(documents, indent=2),
@@ -131,7 +133,6 @@ class RecoveryBackup:
         sudo_store_path: Path,
         audit_path: Path,
         backup_state_path: Path,
-        scheduled_broadcasts_path: Path,
         load_env,
     ) -> None:
         self.root = root
@@ -141,7 +142,6 @@ class RecoveryBackup:
         self.sudo_store_path = sudo_store_path
         self.audit_path = audit_path
         self.backup_state_path = backup_state_path
-        self.scheduled_broadcasts_path = scheduled_broadcasts_path
         self.load_env = load_env
         self.last_database_errors: dict[str, str] = {}
 
@@ -153,7 +153,6 @@ class RecoveryBackup:
             (self.sudo_store_path, "manager_sudoers.json"),
             (self.audit_path, "manager_audit.jsonl"),
             (self.backup_state_path, "manager_backup_state.json"),
-            (self.scheduled_broadcasts_path, "manager_scheduled_broadcasts.json"),
         ):
             if path.is_file():
                 sources.append((path, archive_name))
@@ -163,7 +162,12 @@ class RecoveryBackup:
                 sources.append((env_path, f"deployments/{deployment.name}/.env"))
             for session_path in deployment.deployment_path.glob("*.session*"):
                 if session_path.is_file():
-                    sources.append((session_path, f"deployments/{deployment.name}/{session_path.name}"))
+                    sources.append(
+                        (
+                            session_path,
+                            f"deployments/{deployment.name}/{session_path.name}",
+                        )
+                    )
         for session_path in self.root.glob("deploy-manager.session*"):
             if session_path.is_file():
                 sources.append((session_path, session_path.name))
@@ -183,13 +187,17 @@ class RecoveryBackup:
         for source_root in (self.root / "anony", self.root / "docs"):
             for source in source_root.rglob("*"):
                 if source.is_file() and "__pycache__" not in source.parts:
-                    sources.append((source, f"source/{source.relative_to(self.root).as_posix()}"))
+                    sources.append(
+                        (source, f"source/{source.relative_to(self.root).as_posix()}")
+                    )
         return sources
 
     async def create_archive(self) -> Path:
         self.last_database_errors = {}
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        archive_path = Path(tempfile.gettempdir()) / f"aviax-manager-backup-{timestamp}.zip"
+        archive_path = (
+            Path(tempfile.gettempdir()) / f"aviax-manager-backup-{timestamp}.zip"
+        )
         deployments = self.store.list()
         staging = Path(tempfile.mkdtemp(prefix="aviax-db-backup-"))
         database_manifests = {}
@@ -211,7 +219,9 @@ class RecoveryBackup:
                         staging / "databases" / deployment.name,
                     )
                 except Exception as exc:
-                    logger.exception("Could not export database for %s", deployment.name)
+                    logger.exception(
+                        "Could not export database for %s", deployment.name
+                    )
                     database_errors[deployment.name] = f"{type(exc).__name__}: {exc}"
 
             (staging / "RECOVERY.md").write_text(
@@ -269,7 +279,9 @@ class RecoveryBackup:
                 "excluded": ["logs", "downloads", "cache"],
             }
             self.last_database_errors = dict(database_errors)
-            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            with zipfile.ZipFile(
+                archive_path, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
                 archive.writestr("BACKUP_MANIFEST.json", json.dumps(manifest, indent=2))
                 for source, archive_name in self.sources():
                     archive.write(source, archive_name)

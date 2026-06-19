@@ -35,7 +35,6 @@ STORE_PATH = ROOT / "manager_deployments.json"
 SUDO_STORE_PATH = ROOT / "manager_sudoers.json"
 BACKUP_STATE_PATH = ROOT / "manager_backup_state.json"
 AUDIT_LOG_PATH = ROOT / "manager_audit.jsonl"
-SCHEDULED_BROADCASTS_PATH = ROOT / "manager_scheduled_broadcasts.json"
 DEPLOYED_REFRESH_FALLBACK_NOTICE = (
     "⚡ <b>Activation required:</b> Have the deployed bot owner or an existing sudo user "
     "run <code>/refreshconfig</code> in that deployed bot's private chat. "
@@ -486,7 +485,6 @@ class BotManager:
         self.sudo_reconciled: set[str] = set()
         self.recovery_guard = threading.Lock()
         self.backup_lock = threading.Lock()
-        self.scheduled_broadcast_lock = threading.Lock()
         self.operations = DeploymentOperations()
         self.audit = AuditLog(AUDIT_LOG_PATH)
         self.recovery_backup = RecoveryBackup(
@@ -497,7 +495,6 @@ class BotManager:
             sudo_store_path=SUDO_STORE_PATH,
             audit_path=AUDIT_LOG_PATH,
             backup_state_path=BACKUP_STATE_PATH,
-            scheduled_broadcasts_path=SCHEDULED_BROADCASTS_PATH,
             load_env=self.load_deployment_env,
         )
         self.app = Client(
@@ -574,19 +571,6 @@ class BotManager:
             self.broadcast
         )
         self.app.on_message(
-            filters.private
-            & filters.command(["schedulebroadcast", "schedulecast"])
-            & owner
-        )(self.schedule_broadcast)
-        self.app.on_message(
-            filters.private
-            & filters.command(["scheduledbroadcasts", "broadcasts"])
-            & owner
-        )(self.scheduled_broadcasts)
-        self.app.on_message(
-            filters.private & filters.command(["cancelbroadcast", "cancelcast"]) & owner
-        )(self.cancel_scheduled_broadcast)
-        self.app.on_message(
             filters.private & filters.command("addbotsudo") & self.authorized_filter
         )(self.add_bot_sudo)
         self.app.on_message(
@@ -626,9 +610,6 @@ class BotManager:
             "➖ /delsudo &lt;user_id&gt; - Remove manager access. Owner only.\n"
             "💾 /backup - Send a full disaster-recovery backup including databases. Owner only.\n"
             "📣 /broadcast [-user] [-nochat] [-owners] &lt;text&gt; - Broadcast through deployed bots or directly to deployed owners. Owner only.\n"
-            "🕒 /schedulebroadcast &lt;time&gt; [-user] [-nochat] [-owners] &lt;text&gt; - Schedule a manager broadcast. Owner only.\n"
-            "📆 /scheduledbroadcasts - List pending scheduled broadcasts. Owner only.\n"
-            "✖️ /cancelbroadcast &lt;id&gt; - Cancel a scheduled broadcast. Owner only.\n"
             "🛡️ /addbotsudo &lt;deployment&gt; &lt;user_id&gt; - Add a deployed-bot sudo user and refresh it live.\n"
             "🚫 /delbotsudo &lt;deployment&gt; &lt;user_id&gt; - Remove a deployed-bot sudo user and refresh it live.\n"
             "👥 /botsudolist &lt;deployment&gt; - View a deployed bot's sudo users.\n",
@@ -741,9 +722,17 @@ class BotManager:
         mongo_url = env.get("MONGO_URL")
         db_name = deployment.db_name or env.get("DB_NAME")
         if not mongo_url or not db_name:
-            raise ValueError("The deployment database configuration is incomplete.")
+            raise ValueError("Deployment environment is missing MONGO_URL or DB_NAME")
         mongo = AsyncMongoClient(mongo_url, serverSelectionTimeoutMS=12500)
         return mongo, mongo[db_name], env
+
+    @staticmethod
+    def deployment_sudo_doc_id(env: dict[str, str]) -> str:
+        if env.get("MANAGED_SETUP", "").strip().lower() in {"true", "1", "yes", "on"}:
+            deployment_id = (env.get("DEPLOYMENT_ID") or "").strip()
+            if deployment_id:
+                return f"sudoers:{deployment_id}"
+        return "sudoers"
 
     async def deployed_owner_id(
         self, deployment: DeploymentMeta
@@ -923,198 +912,6 @@ class BotManager:
         )
         await status.edit_text(summary)
 
-    def read_scheduled_broadcasts(self) -> list[dict]:
-        try:
-            data = json.loads(SCHEDULED_BROADCASTS_PATH.read_text(encoding="utf-8"))
-            return data.get("broadcasts", []) if isinstance(data, dict) else []
-        except (FileNotFoundError, OSError, ValueError, TypeError):
-            return []
-
-    def save_scheduled_broadcasts(self, broadcasts: list[dict]) -> None:
-        temporary = SCHEDULED_BROADCASTS_PATH.with_suffix(".json.tmp")
-        temporary.write_text(
-            json.dumps({"broadcasts": broadcasts}, indent=2, ensure_ascii=True),
-            encoding="utf-8",
-        )
-        temporary.replace(SCHEDULED_BROADCASTS_PATH)
-
-    @staticmethod
-    def format_run_at(value: str) -> str:
-        try:
-            return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M")
-        except ValueError:
-            return value
-
-    def parse_scheduled_broadcast(
-        self, command_text: str
-    ) -> tuple[Optional[datetime], str, Optional[str]]:
-        command_text = command_text.strip()
-        relative = re.match(
-            r"^in\s+(\d+)\s*([mhd])\b\s*(.*)$", command_text, re.I | re.S
-        )
-        if relative:
-            amount = int(relative.group(1))
-            unit = relative.group(2).lower()
-            seconds = amount * {"m": 60, "h": 3600, "d": 86400}[unit]
-            if seconds < 60:
-                return None, "", "Use at least 1 minute for a scheduled broadcast."
-            return (
-                datetime.fromtimestamp(time.time() + seconds, timezone.utc),
-                relative.group(3),
-                None,
-            )
-
-        absolute = re.match(
-            r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2})(?:\s+|$)(.*)$", command_text, re.S
-        )
-        if absolute:
-            try:
-                local_time = datetime.strptime(
-                    absolute.group(1).replace("T", " "), "%Y-%m-%d %H:%M"
-                ).astimezone()
-            except ValueError:
-                return None, "", "Use time as <code>YYYY-MM-DD HH:MM</code>."
-            return local_time.astimezone(timezone.utc), absolute.group(2), None
-        return (
-            None,
-            "",
-            (
-                "Use <code>in 30m</code>, <code>in 2h</code>, or "
-                "<code>YYYY-MM-DD HH:MM</code> before the message."
-            ),
-        )
-
-    @handler_errors
-    async def schedule_broadcast(self, client: Client, message: Message) -> None:
-        parts = message.text.split(maxsplit=1)
-        run_at, remainder, error = self.parse_scheduled_broadcast(
-            parts[1] if len(parts) > 1 else ""
-        )
-        if error:
-            return await message.reply_text(
-                "🕒 <b>Scheduled broadcast usage</b>\n\n"
-                "<code>/schedulebroadcast in 30m [-user] [-nochat] [-owners] message</code>\n"
-                "<code>/schedulebroadcast 2026-06-16 21:30 [-user] [-nochat] [-owners] message</code>\n\n"
-                f"💡 {error}",
-                reply_parameters=ReplyParameters(message_id=message.id),
-            )
-        include_users = "-user" in remainder.split()
-        exclude_groups = "-nochat" in remainder.split()
-        owners_only = "-owners" in remainder.split()
-        text = re.sub(r"(?<!\S)-(?:user|nochat|owners)(?!\S)", "", remainder).strip()
-        if message.reply_to_message:
-            text = (
-                message.reply_to_message.text
-                or message.reply_to_message.caption
-                or text
-            )
-        if not text:
-            return await message.reply_text(
-                "📣 <b>Broadcast text is required.</b>\n\n"
-                "Reply to a text message or include text after the scheduled time.",
-                reply_parameters=ReplyParameters(message_id=message.id),
-            )
-        if len(text) > 4096:
-            return await message.reply_text(
-                "❌ <b>The broadcast is too long.</b>\n\n"
-                "💡 Keep the message within Telegram's 4096-character text limit.",
-                reply_parameters=ReplyParameters(message_id=message.id),
-            )
-        if run_at <= datetime.now(timezone.utc):
-            return await message.reply_text(
-                "❌ <b>The scheduled time is already past.</b>",
-                reply_parameters=ReplyParameters(message_id=message.id),
-            )
-
-        item = {
-            "id": uuid.uuid4().hex[:8],
-            "run_at": run_at.isoformat(),
-            "text": text,
-            "include_users": include_users,
-            "exclude_groups": exclude_groups,
-            "owners_only": owners_only,
-            "requested_by": message.from_user.id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        with self.scheduled_broadcast_lock:
-            broadcasts = self.read_scheduled_broadcasts()
-            broadcasts.append(item)
-            broadcasts.sort(key=lambda entry: entry.get("run_at", ""))
-            self.save_scheduled_broadcasts(broadcasts)
-        self.audit.record(
-            "schedule_broadcast",
-            issuer_id=message.from_user.id,
-            deployment="all",
-            result="scheduled",
-            detail=f"id={item['id']} run_at={item['run_at']}",
-        )
-        await message.reply_text(
-            f"✅ <b>Broadcast scheduled.</b>\n\n"
-            f"🆔 ID: <code>{item['id']}</code>\n"
-            f"🕒 Runs at: <code>{self.format_run_at(item['run_at'])}</code>\n"
-            f"👑 Owners only: <code>{'yes' if owners_only else 'no'}</code>\n"
-            f"👤 Include users: <code>{'yes' if include_users else 'no'}</code>\n"
-            f"👥 Include groups: <code>{'no' if exclude_groups else 'yes'}</code>",
-            reply_parameters=ReplyParameters(message_id=message.id),
-        )
-
-    @handler_errors
-    async def scheduled_broadcasts(self, client: Client, message: Message) -> None:
-        with self.scheduled_broadcast_lock:
-            broadcasts = self.read_scheduled_broadcasts()
-        if not broadcasts:
-            return await message.reply_text(
-                "📭 No scheduled broadcasts.",
-                reply_parameters=ReplyParameters(message_id=message.id),
-            )
-        lines = ["<b>📆 Scheduled Broadcasts</b>"]
-        for item in broadcasts[:20]:
-            preview = html.escape(item.get("text", "")[:60])
-            target = "owners" if item.get("owners_only") else "bot recipients"
-            lines.append(
-                f"\n🆔 <code>{item.get('id')}</code>\n"
-                f"🕒 <code>{self.format_run_at(item.get('run_at', ''))}</code>\n"
-                f"🎯 <code>{target}</code>\n"
-                f"📣 {preview}{'…' if len(item.get('text', '')) > 60 else ''}"
-            )
-        if len(broadcasts) > 20:
-            lines.append(f"\n…and <code>{len(broadcasts) - 20}</code> more.")
-        await message.reply_text(
-            "\n".join(lines), reply_parameters=ReplyParameters(message_id=message.id)
-        )
-
-    @handler_errors
-    async def cancel_scheduled_broadcast(
-        self, client: Client, message: Message
-    ) -> None:
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2:
-            return await message.reply_text(
-                "✖️ Usage: <code>/cancelbroadcast &lt;scheduled_id&gt;</code>",
-                reply_parameters=ReplyParameters(message_id=message.id),
-            )
-        target = args[1].strip()
-        with self.scheduled_broadcast_lock:
-            broadcasts = self.read_scheduled_broadcasts()
-            kept = [item for item in broadcasts if item.get("id") != target]
-            if len(kept) == len(broadcasts):
-                return await message.reply_text(
-                    f"📭 Scheduled broadcast <code>{html.escape(target)}</code> was not found.",
-                    reply_parameters=ReplyParameters(message_id=message.id),
-                )
-            self.save_scheduled_broadcasts(kept)
-        self.audit.record(
-            "cancel_scheduled_broadcast",
-            issuer_id=message.from_user.id,
-            deployment="all",
-            result="cancelled",
-            detail=target,
-        )
-        await message.reply_text(
-            f"✅ Cancelled scheduled broadcast <code>{html.escape(target)}</code>.",
-            reply_parameters=ReplyParameters(message_id=message.id),
-        )
-
     async def dispatch_broadcast_all(
         self,
         *,
@@ -1270,10 +1067,10 @@ class BotManager:
 
         mongo = None
         try:
-            mongo, database, _ = self.deployment_database(deployment)
+            mongo, database, env = self.deployment_database(deployment)
             await mongo.admin.command("ping")
             result = await database.cache.update_one(
-                {"_id": "sudoers"},
+                {"_id": self.deployment_sudo_doc_id(env)},
                 {"$addToSet": {"user_ids": {"$each": desired}}},
                 upsert=True,
             )
@@ -1390,10 +1187,10 @@ class BotManager:
 
         mongo = None
         try:
-            mongo, database, _ = self.deployment_database(deployment)
+            mongo, database, env = self.deployment_database(deployment)
             await mongo.admin.command("ping")
             result = await database.cache.update_one(
-                {"_id": "sudoers"},
+                {"_id": self.deployment_sudo_doc_id(env)},
                 {"$addToSet": {"user_ids": user_id}},
                 upsert=True,
             )
@@ -1485,7 +1282,7 @@ class BotManager:
                     "💡 Use that deployed bot's <code>/changeowner</code> command first."
                 )
             result = await database.cache.update_one(
-                {"_id": "sudoers"},
+                {"_id": self.deployment_sudo_doc_id(env)},
                 {"$pull": {"user_ids": user_id}},
             )
         except Exception:
@@ -1564,7 +1361,10 @@ class BotManager:
         try:
             mongo, database, env = self.deployment_database(deployment)
             await mongo.admin.command("ping")
-            sudo_doc = await database.cache.find_one({"_id": "sudoers"}) or {}
+            sudo_doc_id = self.deployment_sudo_doc_id(env)
+            sudo_doc = await database.cache.find_one({"_id": sudo_doc_id}) or {}
+            if not sudo_doc and sudo_doc_id != "sudoers":
+                sudo_doc = await database.cache.find_one({"_id": "sudoers"}) or {}
             runtime = await database.cache.find_one({"_id": "runtime_config"}) or {}
             owner_id = int(
                 runtime.get("settings", {}).get("OWNER_ID") or env.get("OWNER_ID") or 0
@@ -3778,59 +3578,6 @@ class BotManager:
                 continue
             self._run_on_app_loop(self._send_scheduled_backup)
 
-    async def _dispatch_scheduled_broadcast(self, item: dict) -> None:
-        broadcast_id = item.get("id", "unknown")
-        await self._send_owner_with_retry(
-            f"📣 <b>Scheduled broadcast is starting.</b>\n\n"
-            f"🆔 ID: <code>{html.escape(str(broadcast_id))}</code>\n"
-            f"🕒 Scheduled for: <code>{self.format_run_at(item.get('run_at', ''))}</code>"
-        )
-        try:
-            summary = await self.dispatch_broadcast_all(
-                text=str(item.get("text") or ""),
-                include_users=bool(item.get("include_users")),
-                exclude_groups=bool(item.get("exclude_groups")),
-                owners_only=bool(item.get("owners_only")),
-                requested_by=int(item.get("requested_by") or self.config.owner_id),
-            )
-            await self._send_owner_with_retry(
-                f"✅ <b>Scheduled broadcast dispatched.</b>\n\n"
-                f"🆔 ID: <code>{html.escape(str(broadcast_id))}</code>\n\n"
-                f"{summary}"
-            )
-        except Exception as exc:
-            logger.exception("Scheduled broadcast %s failed.", broadcast_id)
-            await self._send_owner_with_retry(
-                f"❌ <b>Scheduled broadcast failed.</b>\n\n"
-                f"🆔 ID: <code>{html.escape(str(broadcast_id))}</code>\n"
-                f"Reason: <code>{html.escape(type(exc).__name__)}</code>"
-            )
-
-    def _scheduled_broadcast_loop(self) -> None:
-        logger.info("Scheduled broadcast dispatcher started.")
-        while not self.shutdown_event.wait(15):
-            now = datetime.now(timezone.utc)
-            due = []
-            with self.scheduled_broadcast_lock:
-                broadcasts = self.read_scheduled_broadcasts()
-                remaining = []
-                for item in broadcasts:
-                    try:
-                        run_at = datetime.fromisoformat(item.get("run_at", ""))
-                    except (TypeError, ValueError):
-                        logger.warning(
-                            "Dropping invalid scheduled broadcast entry: %s", item
-                        )
-                        continue
-                    if run_at <= now:
-                        due.append(item)
-                    else:
-                        remaining.append(item)
-                if due:
-                    self.save_scheduled_broadcasts(remaining)
-            for item in due:
-                self._run_on_app_loop(self._dispatch_scheduled_broadcast, item)
-
     def start_process(
         self,
         deployment: DeploymentMeta,
@@ -4106,9 +3853,6 @@ class BotManager:
         signal.signal(signal.SIGTERM, self._shutdown_handler)
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.backup_thread = threading.Thread(target=self._backup_loop, daemon=True)
-        self.scheduled_broadcast_thread = threading.Thread(
-            target=self._scheduled_broadcast_loop, daemon=True
-        )
         try:
             # Start the bot client so the event loop is available for notifications
             self.app.start()
@@ -4116,7 +3860,6 @@ class BotManager:
             # start monitor thread after app started
             self.monitor_thread.start()
             self.backup_thread.start()
-            self.scheduled_broadcast_thread.start()
 
             # Block until stop signal; idle keeps the client running.
             idle()
@@ -4127,8 +3870,6 @@ class BotManager:
                 self.monitor_thread.join(timeout=2)
             if self.backup_thread.is_alive():
                 self.backup_thread.join(timeout=2)
-            if self.scheduled_broadcast_thread.is_alive():
-                self.scheduled_broadcast_thread.join(timeout=2)
             try:
                 self.app.stop()
             except Exception:

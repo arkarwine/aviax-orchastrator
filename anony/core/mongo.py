@@ -312,19 +312,62 @@ class MongoDB:
         )
 
     # SUDO METHODS
+    def sudo_doc_id(self) -> str:
+        if config.MANAGED_SETUP and config.DEPLOYMENT_ID:
+            return f"sudoers:{config.DEPLOYMENT_ID}"
+        return "sudoers"
+
+    async def _load_legacy_sudoers(self) -> list[int]:
+        doc = await self.cache.find_one({"_id": "sudoers"})
+        values = doc.get("user_ids", []) if doc else []
+        return [
+            int(value) for value in values if str(value).isdigit() and int(value) > 0
+        ]
+
     async def add_sudo(self, user_id: int) -> None:
         await self.cache.update_one(
-            {"_id": "sudoers"}, {"$addToSet": {"user_ids": user_id}}, upsert=True
+            {"_id": self.sudo_doc_id()},
+            {"$addToSet": {"user_ids": user_id}},
+            upsert=True,
         )
 
     async def del_sudo(self, user_id: int) -> None:
         await self.cache.update_one(
-            {"_id": "sudoers"}, {"$pull": {"user_ids": user_id}}
+            {"_id": self.sudo_doc_id()}, {"$pull": {"user_ids": user_id}}
         )
 
     async def get_sudoers(self) -> list[int]:
-        doc = await self.cache.find_one({"_id": "sudoers"})
-        return doc.get("user_ids", []) if doc else []
+        doc = await self.cache.find_one({"_id": self.sudo_doc_id()})
+        if doc:
+            values = doc.get("user_ids", [])
+            return [
+                int(value)
+                for value in values
+                if str(value).isdigit() and int(value) > 0
+            ]
+        if self.sudo_doc_id() != "sudoers":
+            legacy = await self._load_legacy_sudoers()
+            if legacy:
+                await self.cache.update_one(
+                    {"_id": self.sudo_doc_id()},
+                    {"$set": {"user_ids": legacy}},
+                    upsert=True,
+                )
+            return legacy
+        return []
+
+    # SCHEDULED BROADCAST METHODS
+    async def get_scheduled_broadcasts(self) -> list[dict]:
+        doc = await self.cache.find_one({"_id": "scheduled_broadcasts"})
+        items = doc.get("items", []) if doc else []
+        return items if isinstance(items, list) else []
+
+    async def save_scheduled_broadcasts(self, broadcasts: list[dict]) -> None:
+        await self.cache.update_one(
+            {"_id": "scheduled_broadcasts"},
+            {"$set": {"items": broadcasts}},
+            upsert=True,
+        )
 
     # USER METHODS
     async def is_user(self, user_id: int) -> bool:
@@ -344,7 +387,6 @@ class MongoDB:
         if not self.users:
             self.users.extend([user["_id"] async for user in self.usersdb.find()])
         return self.users
-
 
     async def migrate_coll(self) -> None:
         logger.info("Migrating users and chats from old collections...")
