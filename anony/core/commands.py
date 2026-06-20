@@ -17,7 +17,8 @@ PUBLIC_PRIVATE_COMMANDS = [
 
 PUBLIC_GROUP_COMMANDS = [
     ("play", "Play a song or replied media"),
-    ("song", "Send the currently playing song file"),
+    ("nowplaying", "Show the current now-playing card"),
+    ("song", "Send the currently playing song as MP3"),
     ("vplay", "Play a video"),
     ("queue", "View the current queue"),
     ("maintenance", "View maintenance restart status"),

@@ -56,7 +56,6 @@ class HealthReporter:
     async def process_control_requests(self) -> None:
         from anony import app, config, db
         from anony.core.commands import (
-            set_public_user_command_menu,
             set_user_command_menu,
             sync_command_menus,
         )
@@ -117,49 +116,30 @@ class HealthReporter:
                 raise ValueError("invalid owner user id")
             keep_previous_sudo = bool(payload.get("keep_previous_sudo", True))
             previous_owner = app.owner
-            previous_privileged = set(app.sudoers)
             await db.set_config("OWNER_ID", user_id)
             await db.add_sudo(user_id)
-            config.apply_runtime_config({"OWNER_ID": user_id})
-            app.owner = user_id
-            app.sudoers.add(user_id)
             if previous_owner and previous_owner != user_id:
                 if keep_previous_sudo:
-                    app.sudoers.add(previous_owner)
                     await db.add_sudo(previous_owner)
-                    try:
-                        await set_user_command_menu(previous_owner)
-                    except Exception:
-                        logger.warning("Owner changed, but previous owner menu refresh failed.")
                 else:
-                    app.sudoers.discard(previous_owner)
                     await db.del_sudo(previous_owner)
-                    try:
-                        await set_public_user_command_menu(previous_owner)
-                    except Exception:
-                        logger.warning("Owner changed, but previous owner menu cleanup failed.")
+            config.apply_runtime_config({"OWNER_ID": user_id})
+            app.owner = user_id
+            data = await refresh_sudoers()
             try:
                 await set_user_command_menu(user_id, owner=True)
             except Exception:
                 logger.warning("Owner changed, but new owner menu refresh failed.")
-            try:
-                warnings = await asyncio.wait_for(
-                    sync_command_menus(previous_privileged),
-                    timeout=45,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Command menu refresh timed out after owner change.")
-                warnings = ["command menu refresh timed out"]
-            except Exception:
-                logger.exception("Command menu refresh failed after owner change.")
-                warnings = ["command menu refresh failed"]
             return {
                 "owner_id": user_id,
                 "previous_owner": previous_owner,
                 "keep_previous_sudo": keep_previous_sudo,
                 "sudoer_count": len(app.sudoers),
-                "warnings": warnings,
+                "effective_owner": app.owner,
+                "owner_has_sudo": user_id in app.sudoers,
+                "warnings": data.get("warnings", []),
             }
+
         async def broadcast_text(payload: dict) -> dict:
             from anony.plugins.broadcast import start_runtime_broadcast
 

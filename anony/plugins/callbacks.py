@@ -82,7 +82,9 @@ async def queue_request_callback(_, query: types.CallbackQuery):
 
     if action == "status":
         if position < 0:
-            return await query.answer("This request has played or left the queue.", show_alert=True)
+            return await query.answer(
+                "This request has played or left the queue.", show_alert=True
+            )
         media = queue.get_queue(chat_id)[position]
         return await query.edit_message_text(
             "📥 <b>Queue request</b>\n\n"
@@ -111,9 +113,58 @@ async def queue_request_callback(_, query: types.CallbackQuery):
             )
     removed = queue.remove(chat_id, queue_id)
     if not removed:
-        return await query.answer("This request has started or left the queue.", show_alert=True)
+        return await query.answer(
+            "This request has started or left the queue.", show_alert=True
+        )
     await query.answer("Removed from queue.", show_alert=True)
     await query.edit_message_text(f"🗑 <b>Removed from queue</b>\n\n🎵 {removed.title}")
+
+
+@app.on_callback_query(filters.regex(r"^song_request ") & ~app.bl_users)
+@lang.language()
+async def song_request_callback(_, query: types.CallbackQuery):
+    chat_id = int(query.data.split()[1])
+    if not await db.get_call(chat_id):
+        return await query.answer("Nothing is currently playing.", show_alert=True)
+
+    media = queue.get_current(chat_id)
+    if not media:
+        return await query.answer("Nothing is currently playing.", show_alert=True)
+    if getattr(media, "video", False):
+        return await query.answer(
+            "The current playback is a video stream, so there is no MP3 to send.",
+            show_alert=True,
+        )
+
+    from anony.plugins.play import can_send_song_file, send_song_file
+
+    if not can_send_song_file(media):
+        if getattr(media, "file_path", None):
+            return await query.answer(
+                "The current song file is no longer available on disk.",
+                show_alert=True,
+            )
+        return await query.answer(
+            "This track is being streamed from a source that cannot be sent as an MP3.",
+            show_alert=True,
+        )
+
+    await query.answer("Preparing MP3...", show_alert=False)
+    status = await query.message.reply_text(
+        f"🎵 Preparing MP3 for <b>{media.title}</b>..."
+    )
+    try:
+        await send_song_file(
+            chat_id,
+            media,
+            reply_to_message_id=query.message.id,
+        )
+    except Exception:
+        return await status.edit_text(
+            "❌ I could not prepare the MP3 for this song. Please try again shortly."
+        )
+
+    await status.delete()
 
 
 @app.on_callback_query(filters.regex("controls") & ~app.bl_users)
@@ -140,8 +191,12 @@ async def _controls(_, query: types.CallbackQuery):
     if action == "queue":
         items = queue.get_queue(chat_id)[1:6]
         if not items:
-            return await query.answer("No tracks are waiting in the queue.", show_alert=True)
-        text = "\n".join(f"{index}. {item.title}" for index, item in enumerate(items, start=1))
+            return await query.answer(
+                "No tracks are waiting in the queue.", show_alert=True
+            )
+        text = "\n".join(
+            f"{index}. {item.title}" for index, item in enumerate(items, start=1)
+        )
         return await query.answer(f"Next tracks:\n{text}", show_alert=True)
     await query.answer(query.lang["processing"], show_alert=True)
 
@@ -268,8 +323,15 @@ async def _help(_, query: types.CallbackQuery):
         except Exception:
             return
 
-    if data[1] == "sudo" and query.from_user.id != app.owner and query.from_user.id not in app.sudoers:
-        return await query.answer("Sudo commands are only visible to the owner and sudo users.", show_alert=True)
+    if (
+        data[1] == "sudo"
+        and query.from_user.id != app.owner
+        and query.from_user.id not in app.sudoers
+    ):
+        return await query.answer(
+            "Sudo commands are only visible to the owner and sudo users.",
+            show_alert=True,
+        )
 
     await query.edit_message_text(
         text=f"📘 {query.lang[f'help_{data[1]}']}",

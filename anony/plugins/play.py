@@ -4,16 +4,19 @@
 
 
 import asyncio
+import re
+import time
 from functools import wraps
 from html import escape
 from pathlib import Path
 from uuid import uuid4
 
 from pyrogram import filters, types
+from pyrogram.errors import ChatSendMediaForbidden, ChatSendPhotosForbidden
 
-from anony import anon, app, config, db, lang, logger, queue, tg, yt
+from anony import anon, app, config, db, lang, logger, queue, tg, thumb, yt
 from anony.core.calls import PlaybackRecoveryQueued
-from anony.helpers import buttons, utils
+from anony.helpers import Track, buttons, utils
 from anony.helpers._feedback import (
     DOWNLOAD_CUSTOM,
     SEARCH_CUSTOM,
@@ -61,21 +64,149 @@ def can_send_song_file(media) -> bool:
     return bool(file_path and Path(file_path).is_file())
 
 
+def format_clock(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    if seconds >= 3600:
+        return time.strftime("%H:%M:%S", time.gmtime(seconds))
+    return time.strftime("%M:%S", time.gmtime(seconds))
+
+
+def clean_file_name(value: str, fallback: str = "song") -> str:
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", "", (value or "").strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned or fallback
+
+
+def media_title_html(media) -> str:
+    title = escape(getattr(media, "title", None) or "Unknown track")
+    url = getattr(media, "url", None)
+    return f'<a href="{url}">{title}</a>' if url else f"<b>{title}</b>"
+
+
+def media_artist(media) -> str | None:
+    artist = getattr(media, "channel_name", None)
+    if artist:
+        return artist.strip()
+    return None
+
+
+def build_now_playing_text(chat_id: int, media) -> str:
+    next_media = queue.get_next(chat_id, check=True)
+    queue_length = max(0, len(queue.get_queue(chat_id)) - 1)
+    duration_text = getattr(media, "duration", None) or (
+        format_clock(media.duration_sec)
+        if getattr(media, "duration_sec", 0)
+        else "Live"
+    )
+    text = (
+        "▶️ <b>Now playing</b>\n\n"
+        f"🎵 <b>Title:</b> {media_title_html(media)}\n"
+        f"⏱️ Duration: <code>{duration_text}</code>\n"
+        f"🙋 Requested by: {getattr(media, 'user', 'Unknown')}"
+    )
+    if getattr(media, "duration_sec", 0) > 0 and getattr(media, "time", 0) > 0:
+        played = min(max(0, int(media.time)), int(media.duration_sec))
+        text += f"\n⏳ Progress: <code>{format_clock(played)} / {format_clock(media.duration_sec)}</code>"
+    text += (
+        "\n\n"
+        f"⏭️ Next: <b>{escape(next_media.title) if next_media and next_media.title else 'Nothing queued'}</b>\n"
+        f"📋 Queue: <code>{queue_length}</code> waiting"
+    )
+    return text
+
+
+def song_export_path(media) -> Path:
+    downloads_dir = (
+        Path(config.DOWNLOADS_PATH)
+        if config.DOWNLOADS_PATH
+        else Path.cwd() / "downloads"
+    )
+    export_dir = downloads_dir / "songs"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    return export_dir / f"{clean_file_name(getattr(media, 'id', 'current-song'))}.mp3"
+
+
+async def ensure_song_mp3(media) -> Path:
+    if not can_send_song_file(media):
+        raise FileNotFoundError("Source audio file is unavailable")
+
+    source_path = Path(str(media.file_path))
+    export_path = song_export_path(media)
+    if (
+        export_path.exists()
+        and export_path.stat().st_size > 0
+        and export_path.stat().st_mtime >= source_path.stat().st_mtime
+    ):
+        return export_path
+
+    title = getattr(media, "title", None) or source_path.stem
+    artist = media_artist(media)
+    temp_path = export_path.with_suffix(".mp3.part")
+    temp_path.unlink(missing_ok=True)
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source_path),
+        "-vn",
+        "-codec:a",
+        "libmp3lame",
+        "-q:a",
+        "2",
+        "-map_metadata",
+        "-1",
+        "-metadata",
+        f"title={title}",
+    ]
+    if artist:
+        command.extend(["-metadata", f"artist={artist}"])
+    command.append(str(temp_path))
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.communicate()
+        temp_path.unlink(missing_ok=True)
+        raise RuntimeError("MP3 conversion timed out") from None
+
+    if (
+        process.returncode != 0
+        or not temp_path.exists()
+        or temp_path.stat().st_size <= 0
+    ):
+        temp_path.unlink(missing_ok=True)
+        error_text = (stderr or b"").decode("utf-8", errors="replace")[-500:]
+        raise RuntimeError(error_text or "MP3 conversion failed")
+
+    temp_path.replace(export_path)
+    return export_path
+
+
 async def send_song_file(
     chat_id: int,
     media,
     *,
     reply_to_message_id: int | None = None,
 ) -> bool:
-    if not can_send_song_file(media):
-        return False
-
+    export_path = await ensure_song_mp3(media)
+    title = getattr(media, "title", None) or export_path.stem
+    performer = media_artist(media)
     send_kwargs = {
         "chat_id": chat_id,
-        "audio": str(media.file_path),
-        "title": media.title or Path(str(media.file_path)).stem,
+        "audio": str(export_path),
+        "title": title,
+        "file_name": f"{clean_file_name(title)}.mp3",
         "disable_notification": True,
     }
+    if performer:
+        send_kwargs["performer"] = performer
     if getattr(media, "duration_sec", 0) > 0:
         send_kwargs["duration"] = media.duration_sec
     if reply_to_message_id:
@@ -83,6 +214,51 @@ async def send_song_file(
 
     await app.send_audio(**send_kwargs)
     return True
+
+
+async def send_now_playing_card(message: types.Message, media) -> None:
+    text = build_now_playing_text(message.chat.id, media)
+    keyboard = buttons.controls(message.chat.id)
+    thumb_path = None
+    if config.THUMB_GEN:
+        try:
+            thumb_path = (
+                await thumb.generate(media)
+                if isinstance(media, Track)
+                else config.DEFAULT_THUMB
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not build now-playing artwork chat=%s media=%s: %s",
+                message.chat.id,
+                getattr(media, "id", "unknown"),
+                exc,
+            )
+    if thumb_path:
+        try:
+            if str(thumb_path).lower().endswith(".gif"):
+                await message.reply_animation(
+                    animation=thumb_path,
+                    caption=text,
+                    reply_markup=keyboard,
+                )
+            else:
+                await message.reply_photo(
+                    photo=thumb_path,
+                    caption=text,
+                    reply_markup=keyboard,
+                )
+            return
+        except (ChatSendMediaForbidden, ChatSendPhotosForbidden):
+            pass
+        except Exception as exc:
+            logger.warning(
+                "Could not send now-playing media card chat=%s media=%s: %s",
+                message.chat.id,
+                getattr(media, "id", "unknown"),
+                exc,
+            )
+    await message.reply_text(text, reply_markup=keyboard)
 
 
 async def send_play_log_safely(
@@ -474,6 +650,15 @@ async def play_hndlr(
     )
 
 
+@app.on_message(filters.command(["nowplaying", "np"]) & filters.group & ~app.bl_users)
+@lang.language()
+async def now_playing_hndlr(_, m: types.Message) -> None:
+    media = queue.get_current(m.chat.id)
+    if not media or not await db.get_call(m.chat.id):
+        return await m.reply_text("❌ Nothing is currently playing.")
+    await send_now_playing_card(m, media)
+
+
 @app.on_message(filters.command(["song"]) & filters.group & ~app.bl_users)
 @lang.language()
 async def song_hndlr(_, m: types.Message) -> None:
@@ -496,7 +681,7 @@ async def song_hndlr(_, m: types.Message) -> None:
         )
 
     sent = await m.reply_text(
-        f"🎵 Sending <b>{escape(media.title or 'current song')}</b>..."
+        f"🎵 Preparing MP3 for <b>{escape(media.title or 'current song')}</b>..."
     )
     try:
         await send_song_file(
@@ -511,7 +696,7 @@ async def song_hndlr(_, m: types.Message) -> None:
             getattr(media, "id", "unknown"),
         )
         return await sent.edit_text(
-            "❌ I could not send the current song file. Please try again shortly."
+            "❌ I could not prepare the MP3 for this song. Please try again shortly."
         )
 
     await sent.delete()

@@ -1305,7 +1305,7 @@ class BotManager:
             {"user_id": new_owner, "keep_previous_sudo": keep_previous_sudo},
         )
 
-        if runtime_success:
+        if runtime_success and int(runtime_data.get("effective_owner") or 0) == new_owner:
             env_warning = self.update_deployment_owner_env(deployment, new_owner)
             previous_owner = int(runtime_data.get("previous_owner") or previous_owner or 0) or None
             if previous_owner and previous_owner != new_owner:
@@ -1327,6 +1327,10 @@ class BotManager:
                 f"🔁 {access}\n"
                 f"⚡ Applied live through the running deployed bot. {html.escape(runtime_detail)}."
                 f"{warning_text}{env_warning}"
+            )
+        if runtime_success:
+            runtime_detail = (
+                "the deployed bot accepted the request but did not confirm the new owner as active"
             )
 
         mongo = None

@@ -16,7 +16,15 @@ class Inline:
 
     def cancel_dl(self, text) -> types.InlineKeyboardMarkup:
         return self.ikm(
-            [[self.ikb(text=text, callback_data="cancel_dl", style=enums.ButtonStyle.DANGER)]]
+            [
+                [
+                    self.ikb(
+                        text=text,
+                        callback_data="cancel_dl",
+                        style=enums.ButtonStyle.DANGER,
+                    )
+                ]
+            ]
         )
 
     def controls(
@@ -81,6 +89,10 @@ class Inline:
                         callback_data=f"controls queue {chat_id}",
                     ),
                     self.ikb(
+                        text="🎵 Song",
+                        callback_data=f"song_request {chat_id}",
+                    ),
+                    self.ikb(
                         text="🔁 Loop",
                         callback_data=f"controls loop {chat_id}",
                     ),
@@ -143,7 +155,9 @@ class Inline:
                     ),
                 )
                 for i, cb in enumerate(cbs)
-                if cb != "sudo" or user_id == app.owner or (user_id is not None and user_id in app.sudoers)
+                if cb != "sudo"
+                or user_id == app.owner
+                or (user_id is not None and user_id in app.sudoers)
             ]
             rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
 
@@ -169,7 +183,15 @@ class Inline:
 
     def ping_markup(self, text: str) -> types.InlineKeyboardMarkup:
         return self.ikm(
-            [[self.ikb(text=text, url=config.SUPPORT_CHAT, style=enums.ButtonStyle.PRIMARY)]]
+            [
+                [
+                    self.ikb(
+                        text=text,
+                        url=config.SUPPORT_CHAT,
+                        style=enums.ButtonStyle.PRIMARY,
+                    )
+                ]
+            ]
         )
 
     def setup_next_session(self) -> types.InlineKeyboardMarkup:
@@ -246,7 +268,12 @@ class Inline:
         )
 
     def settings_markup(
-        self, lang: dict, admin_only: bool, cmd_delete: bool, language: str, chat_id: int
+        self,
+        lang: dict,
+        admin_only: bool,
+        cmd_delete: bool,
+        language: str,
+        chat_id: int,
     ) -> types.InlineKeyboardMarkup:
         return self.ikm(
             [
@@ -428,7 +455,7 @@ class Inline:
                         callback_data=f"maintenance remove {chat_id} {maintenance_id} {owner_id}",
                         style=enums.ButtonStyle.DANGER,
                     ),
-                ]
+                ],
             ]
         )
 
