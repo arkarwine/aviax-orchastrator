@@ -384,6 +384,7 @@ def handler_errors(func):
         deployment_commands = {
             "add_bot_sudo",
             "bot_sudo_list",
+            "change_bot_owner",
             "cancel_restart",
             "change_database",
             "delete",
@@ -575,6 +576,11 @@ class BotManager:
         )(self.add_bot_sudo)
         self.app.on_message(
             filters.private
+            & filters.command(["changebotowner", "transferbotowner"])
+            & self.authorized_filter
+        )(self.change_bot_owner)
+        self.app.on_message(
+            filters.private
             & filters.command(["delbotsudo", "rmbotsudo"])
             & self.authorized_filter
         )(self.del_bot_sudo)
@@ -611,6 +617,7 @@ class BotManager:
             "💾 /backup - Send a full disaster-recovery backup including databases. Owner only.\n"
             "📣 /broadcast [-user] [-nochat] [-owners] &lt;text&gt; - Broadcast through deployed bots or directly to deployed owners. Owner only.\n"
             "🛡️ /addbotsudo &lt;deployment&gt; &lt;user_id&gt; - Add a deployed-bot sudo user and refresh it live.\n"
+            "👑 /changebotowner &lt;deployment&gt; &lt;user_id&gt; [keep|remove] - Change a deployed bot owner.\n"
             "🚫 /delbotsudo &lt;deployment&gt; &lt;user_id&gt; - Remove a deployed-bot sudo user and refresh it live.\n"
             "👥 /botsudolist &lt;deployment&gt; - View a deployed bot's sudo users.\n",
             reply_parameters=ReplyParameters(message_id=message.id),
@@ -733,6 +740,24 @@ class BotManager:
             if deployment_id:
                 return f"sudoers:{deployment_id}"
         return "sudoers"
+
+    def update_deployment_owner_env(self, deployment: DeploymentMeta, owner_id: int) -> str:
+        env_path = deployment.deployment_path / ".env"
+        if not env_path.exists():
+            return "\n⚠️ The owner was changed, but the deployment <code>.env</code> file was not found."
+        try:
+            env_vars = self.load_deployment_env(env_path)
+            env_vars["OWNER_ID"] = str(owner_id)
+            temporary = env_path.with_name(".env.tmp")
+            temporary.write_text(
+                "\n".join(f"{key}={value}" for key, value in env_vars.items()),
+                encoding="utf-8",
+            )
+            temporary.replace(env_path)
+        except Exception:
+            logger.exception("Could not update OWNER_ID in .env for %s", deployment.name)
+            return "\n⚠️ The owner was changed, but <code>.env</code> could not be updated."
+        return ""
 
     async def deployed_owner_id(
         self, deployment: DeploymentMeta
@@ -1232,6 +1257,139 @@ class BotManager:
             f"✅ {label} {state} on <b>{deployment.name}</b>.\n\n{activation}"
         )
 
+    @handler_errors
+    async def change_bot_owner(self, client: Client, message: Message) -> None:
+        args = message.text.split(maxsplit=3)
+        if len(args) < 3 or not args[2].strip().isdigit() or int(args[2]) <= 0:
+            return await message.reply_text(
+                "👑 Usage: <code>/changebotowner &lt;deployment&gt; &lt;new_owner_user_id&gt; [keep|remove]</code>\n\n"
+                "💡 <code>keep</code> keeps the previous owner as sudo. <code>remove</code> removes their access. Default: <code>keep</code>.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        name = normalize_name(args[1])
+        deployment = self.store.get(name)
+        if not deployment:
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> was not found. Use <code>/list</code> to check names.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        new_owner = int(args[2])
+        action = args[3].strip().lower() if len(args) > 3 else "keep"
+        if action not in {"keep", "keepsudo", "keep_sudo", "yes", "remove", "removesudo", "remove_sudo", "no"}:
+            return await message.reply_text(
+                "❌ The final option must be <code>keep</code> or <code>remove</code>.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        keep_previous_sudo = action in {"keep", "keepsudo", "keep_sudo", "yes"}
+
+        try:
+            user = await client.get_users(new_owner)
+            if user.is_bot:
+                return await message.reply_text(
+                    "❌ A bot account cannot become the deployed bot owner."
+                )
+            owner_label = f"<b>{html.escape(user.first_name or str(new_owner))}</b> (<code>{new_owner}</code>)"
+        except Exception:
+            owner_label = f"<code>{new_owner}</code>"
+
+        status = await message.reply_text(
+            f"👑 Changing owner for <b>{deployment.name}</b> to {owner_label}...",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+        previous_owner, previous_source = await self.deployed_owner_id(deployment)
+
+        runtime_success, runtime_detail, runtime_data = await self.request_runtime_control(
+            deployment,
+            "change_owner",
+            {"user_id": new_owner, "keep_previous_sudo": keep_previous_sudo},
+        )
+
+        if runtime_success:
+            env_warning = self.update_deployment_owner_env(deployment, new_owner)
+            previous_owner = int(runtime_data.get("previous_owner") or previous_owner or 0) or None
+            if previous_owner and previous_owner != new_owner:
+                if keep_previous_sudo and previous_owner not in deployment.manager_sudoers:
+                    deployment.manager_sudoers.append(previous_owner)
+                    deployment.manager_sudoers.sort()
+                    self.store.update(deployment)
+                elif not keep_previous_sudo and previous_owner in deployment.manager_sudoers:
+                    deployment.manager_sudoers = [value for value in deployment.manager_sudoers if value != previous_owner]
+                    self.store.update(deployment)
+            access = "Previous owner kept as sudo." if keep_previous_sudo else "Previous owner access removed."
+            warnings = runtime_data.get("warnings") or []
+            warning_text = ""
+            if warnings:
+                warning_text = "\n⚠️ Menu refresh warnings: " + html.escape(", ".join(str(item) for item in warnings[:3]))
+            return await status.edit_text(
+                f"✅ Owner changed for <b>{deployment.name}</b>.\n\n"
+                f"👑 New owner: {owner_label}\n"
+                f"🔁 {access}\n"
+                f"⚡ Applied live through the running deployed bot. {html.escape(runtime_detail)}."
+                f"{warning_text}{env_warning}"
+            )
+
+        mongo = None
+        try:
+            mongo, database, env = self.deployment_database(deployment)
+            await mongo.admin.command("ping")
+            sudo_doc_id = self.deployment_sudo_doc_id(env)
+            if previous_owner is None:
+                runtime = await database.cache.find_one({"_id": "runtime_config"}) or {}
+                previous_owner = int(runtime.get("settings", {}).get("OWNER_ID") or env.get("OWNER_ID") or 0) or None
+            await database.cache.update_one(
+                {"_id": "runtime_config"},
+                {"$set": {"settings.OWNER_ID": new_owner}},
+                upsert=True,
+            )
+            await database.cache.update_one(
+                {"_id": sudo_doc_id},
+                {"$addToSet": {"user_ids": new_owner}},
+                upsert=True,
+            )
+            if previous_owner and previous_owner != new_owner:
+                if keep_previous_sudo:
+                    await database.cache.update_one(
+                        {"_id": sudo_doc_id},
+                        {"$addToSet": {"user_ids": previous_owner}},
+                        upsert=True,
+                    )
+                    if previous_owner not in deployment.manager_sudoers:
+                        deployment.manager_sudoers.append(previous_owner)
+                        deployment.manager_sudoers.sort()
+                        self.store.update(deployment)
+                else:
+                    await database.cache.update_one(
+                        {"_id": sudo_doc_id},
+                        {"$pull": {"user_ids": previous_owner}},
+                    )
+                    if previous_owner in deployment.manager_sudoers:
+                        deployment.manager_sudoers = [value for value in deployment.manager_sudoers if value != previous_owner]
+                        self.store.update(deployment)
+        except Exception:
+            logger.exception("Could not change deployed-bot owner for %s", deployment.name)
+            return await status.edit_text(
+                "❌ I could not change that deployed bot owner.\n\n"
+                "💡 Check the deployment database configuration and connection, then try again."
+            )
+        finally:
+            if mongo is not None:
+                await mongo.close()
+
+        env_warning = self.update_deployment_owner_env(deployment, new_owner)
+        saved_target = "Mongo and <code>.env</code>" if not env_warning else "Mongo"
+        activation = (
+            f"⚠️ Saved to {saved_target}, but it could not be applied live because "
+            f"{html.escape(runtime_detail)}. Restart the deployment or run <code>/refreshconfig</code> from an existing owner/sudo session."
+        )
+        access = "Previous owner kept as sudo." if keep_previous_sudo else "Previous owner access removed."
+        await status.edit_text(
+            f"✅ Owner change saved for <b>{deployment.name}</b>.\n\n"
+            f"👑 New owner: {owner_label}\n"
+            f"🔁 {access}\n"
+            f"🧭 Previous owner source: <code>{html.escape(previous_source)}</code>\n\n"
+            f"{activation}{env_warning}"
+        )
     @handler_errors
     async def del_bot_sudo(self, client: Client, message: Message) -> None:
         deployment, user_id, error = self.parse_bot_sudo_args(message, "delbotsudo")
