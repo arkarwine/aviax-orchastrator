@@ -9,6 +9,74 @@ from anony import app, config, lang
 from anony.core.lang import lang_codes
 
 
+MODERATION_HELP = {
+    "mod_core": (
+        "🛡️ <u><b>Moderation</b></u>\n"
+        "<i>For everyday admin action. Requires matching admin permissions.</i>\n\n"
+        "/ban, /kick, /unban\n"
+        "/mute, /tmute, /unmute\n"
+        "/warn, /warns, /resetwarns\n"
+        "/setwarnslimit, /setwarnsaction\n"
+        "/purge, /pin, /unpin, /unpinall\n"
+        "/cleanservice, /antichannelpin"
+    ),
+    "mod_spam": (
+        "🧹 <u><b>Anti-Spam</b></u>\n"
+        "<i>Deletes obvious spam and integrates with warnings.</i>\n\n"
+        "/antispam on|off\n"
+        "/spamfilter word\n"
+        "/delspamfilter word\n"
+        "/spamfilters\n"
+        "/spamallow user|link|forward value\n"
+        "/delspamallow user|link|forward value\n"
+        "/spamallowlist"
+    ),
+    "mod_notes": (
+        "🗒️ <u><b>Notes & Filters</b></u>\n"
+        "<i>Save useful replies and automatic keyword responses.</i>\n\n"
+        "/filter \"trigger\" response\n"
+        "/delfilter trigger\n"
+        "/filters\n"
+        "/note \"name\" content\n"
+        "/note name\n"
+        "/delnote name\n"
+        "/notes\n"
+        "#name"
+    ),
+    "mod_welcome": (
+        "👋 <u><b>Welcome & Rules</b></u>\n"
+        "<i>Welcomes use chat-member updates, so they do not depend only on visible service messages.</i>\n\n"
+        "/rules\n"
+        "/setrules text\n"
+        "/resetrules\n"
+        "/welcome on|off\n"
+        "/setwelcome Welcome {mention} to {chat}!\n"
+        "/resetwelcome\n"
+        "/welcomeformat"
+    ),
+    "mod_mentions": (
+        "📣 <u><b>Mentions</b></u>\n"
+        "<i>Batch member calls with delay controls to reduce flood risk.</i>\n\n"
+        "/all text\n"
+        "/callall text\n"
+        "/call amount batch text\n"
+        "/calladmins text\n"
+        "/anybody text\n"
+        "/allstatus\n"
+        "/stopcall\n"
+        "/setall batch|delay|hidden|admins value"
+    ),
+    "mod_utils": (
+        "🧰 <u><b>Group Utilities</b></u>\n"
+        "<i>Small group helpers that are useful during moderation.</i>\n\n"
+        "/id\n"
+        "/info\n"
+        "/admins\n"
+        "/report"
+    ),
+}
+
+
 class Inline:
     def __init__(self):
         self.ikm = types.InlineKeyboardMarkup
@@ -125,6 +193,7 @@ class Inline:
             cbs = [
                 "admins",
                 "auth",
+                "mod",
                 "blist",
                 "lang",
                 "ping",
@@ -136,6 +205,7 @@ class Inline:
             icons = {
                 "admins": "🛡️",
                 "auth": "🔐",
+                "mod": "🧰",
                 "blist": "🚫",
                 "lang": "🌐",
                 "ping": "📶",
@@ -144,24 +214,77 @@ class Inline:
                 "stats": "📊",
                 "sudo": "👑",
             }
+            labels = {
+                "admins": _lang["help_0"],
+                "auth": _lang["help_1"],
+                "mod": _lang.get("help_mod", "Moderation"),
+                "blist": _lang["help_2"],
+                "lang": _lang["help_3"],
+                "ping": _lang["help_4"],
+                "play": _lang["help_5"],
+                "queue": _lang["help_6"],
+                "stats": _lang["help_7"],
+                "sudo": _lang["help_8"],
+            }
             buttons = [
                 self.ikb(
-                    text=f"{icons[cb]} {_lang[f'help_{i}']}",
+                    text=f"{icons[cb]} {labels[cb]}",
                     callback_data=f"help {cb}",
                     style=(
                         enums.ButtonStyle.DANGER
                         if cb == "sudo"
+                        else enums.ButtonStyle.SUCCESS
+                        if cb == "mod"
                         else enums.ButtonStyle.PRIMARY
                     ),
                 )
-                for i, cb in enumerate(cbs)
-                if cb != "sudo"
-                or user_id == app.owner
-                or (user_id is not None and user_id in app.sudoers)
+                for cb in cbs
+                if (
+                    (cb != "sudo" or user_id == app.owner or (user_id is not None and user_id in app.sudoers))
+                    and (cb != "mod" or config.MODERATION_ENABLED)
+                )
             ]
             rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
 
         return self.ikm(rows)
+
+    def moderation_markup(self, _lang: dict) -> types.InlineKeyboardMarkup:
+        return self.ikm(
+            [
+                [
+                    self.ikb("🛡️ Moderation", callback_data="help mod_core", style=enums.ButtonStyle.PRIMARY),
+                    self.ikb("🧹 Anti-Spam", callback_data="help mod_spam", style=enums.ButtonStyle.SUCCESS),
+                ],
+                [
+                    self.ikb("🗒️ Notes", callback_data="help mod_notes", style=enums.ButtonStyle.PRIMARY),
+                    self.ikb("👋 Welcome", callback_data="help mod_welcome", style=enums.ButtonStyle.PRIMARY),
+                ],
+                [
+                    self.ikb("📣 Mentions", callback_data="help mod_mentions", style=enums.ButtonStyle.SUCCESS),
+                    self.ikb("🧰 Utilities", callback_data="help mod_utils", style=enums.ButtonStyle.PRIMARY),
+                ],
+                [
+                    self.ikb(f"↩️ {_lang['back']}", callback_data="help back", style=enums.ButtonStyle.PRIMARY),
+                    self.ikb(f"✖️ {_lang['close']}", callback_data="help close", style=enums.ButtonStyle.DANGER),
+                ],
+            ]
+        )
+
+    def moderation_back_markup(self, _lang: dict) -> types.InlineKeyboardMarkup:
+        return self.ikm(
+            [
+                [
+                    self.ikb("↩️ Moderation", callback_data="help mod", style=enums.ButtonStyle.PRIMARY),
+                    self.ikb(f"✖️ {_lang['close']}", callback_data="help close", style=enums.ButtonStyle.DANGER),
+                ]
+            ]
+        )
+
+    def moderation_help_text(self, section: str) -> str:
+        return MODERATION_HELP.get(
+            section,
+            "🧰 <b>Moderation tools</b>\n\nChoose a category below.",
+        )
 
     def lang_markup(self, _lang: str) -> types.InlineKeyboardMarkup:
         langs = lang.get_languages()

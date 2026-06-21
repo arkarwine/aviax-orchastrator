@@ -7,7 +7,7 @@ import re
 
 from pyrogram import enums, errors, filters, types
 
-from anony import anon, app, db, lang, queue, tg, yt
+from anony import anon, app, config, db, lang, queue, tg, yt
 from anony.helpers import admin_check, buttons, can_manage_vc, maintenance_status_text
 
 
@@ -338,6 +338,25 @@ async def _help(_, query: types.CallbackQuery):
         return await query.answer(
             "Sudo commands are only visible to the owner and sudo users.",
             show_alert=True,
+        )
+
+    if data[1] == "mod":
+        if not config.MODERATION_ENABLED:
+            return await query.answer("Moderation tools are not enabled for this bot.", show_alert=True)
+        return await query.edit_message_text(
+            text=(
+                "🧰 <b>Moderation Tools</b>\n\n"
+                "Pick the section you need. The menu stays compact, but each page gives the exact commands and when to use them."
+            ),
+            reply_markup=buttons.moderation_markup(query.lang),
+        )
+
+    if data[1].startswith("mod_"):
+        if not config.MODERATION_ENABLED:
+            return await query.answer("Moderation tools are not enabled for this bot.", show_alert=True)
+        return await query.edit_message_text(
+            text=buttons.moderation_help_text(data[1]),
+            reply_markup=buttons.moderation_back_markup(query.lang),
         )
 
     await query.edit_message_text(
