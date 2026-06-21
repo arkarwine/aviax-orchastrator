@@ -270,14 +270,16 @@ async def verify_remote_state(chat_id: int, user_id: int, action: str) -> bool:
 async def remote_action(chat_id: int, user_id: int, action: str, duration: int | None = None) -> bool:
     until = datetime.now(timezone.utc) + timedelta(seconds=duration) if duration else None
     if action in {"ban", "tban"}:
-        await flood_safe(app.ban_chat_member, chat_id, user_id, until_date=until)
+        kwargs = {"until_date": until} if until else {}
+        await flood_safe(app.ban_chat_member, chat_id, user_id, **kwargs)
     elif action == "kick":
         await flood_safe(app.ban_chat_member, chat_id, user_id)
         await flood_safe(app.unban_chat_member, chat_id, user_id)
     elif action == "unban":
         await flood_safe(app.unban_chat_member, chat_id, user_id)
     elif action in {"mute", "tmute"}:
-        await flood_safe(app.restrict_chat_member, chat_id, user_id, types.ChatPermissions(), until_date=until)
+        kwargs = {"until_date": until} if until else {}
+        await flood_safe(app.restrict_chat_member, chat_id, user_id, types.ChatPermissions(), **kwargs)
     elif action == "unmute":
         await flood_safe(
             app.restrict_chat_member,
@@ -730,6 +732,28 @@ async def spam_allowlist(chat_id: int) -> dict:
         "links": {str(value).lower() for value in doc.get("links", [])},
         "forwards": {int(value) for value in doc.get("forwards", []) if str(value).lstrip("-").isdigit()},
     }
+
+
+def forward_source_id(message: types.Message) -> int | None:
+    origin = getattr(message, "forward_origin", None)
+    for attr in ("sender_user", "sender_chat"):
+        source = getattr(origin, attr, None) if origin else None
+        if source and getattr(source, "id", None):
+            return source.id
+    origin_chat = getattr(origin, "chat", None) if origin else None
+    for attr in ("sender_chat", "chat"):
+        source = getattr(origin_chat, attr, None) if origin_chat else None
+        if source and getattr(source, "id", None):
+            return source.id
+    if origin_chat and getattr(origin_chat, "id", None):
+        return origin_chat.id
+    return None
+
+
+def is_forwarded(message: types.Message) -> bool:
+    if getattr(message, "forward_origin", None):
+        return True
+    return forward_source_id(message) is not None
 
 
 def command_payload(message: types.Message) -> str:
@@ -1289,10 +1313,9 @@ async def _antispam_config(_, message: types.Message):
                 value = message.command[2].lower().removeprefix("https://").removeprefix("http://")
                 field = "links"
             elif kind in {"forward", "forwards", "source"}:
-                if message.reply_to_message and message.reply_to_message.forward_from_chat:
-                    value = message.reply_to_message.forward_from_chat.id
-                elif message.reply_to_message and message.reply_to_message.forward_from:
-                    value = message.reply_to_message.forward_from.id
+                replied_forward_id = forward_source_id(message.reply_to_message) if message.reply_to_message else None
+                if replied_forward_id:
+                    value = replied_forward_id
                 else:
                     value = int(message.command[2])
                 field = "forwards"
@@ -1331,18 +1354,14 @@ async def _antispam_watcher(_, message: types.Message):
     compact_text = text.removeprefix("https://").removeprefix("http://")
     if any(link in compact_text for link in allow["links"]):
         return
-    forward_id = None
-    if message.forward_from_chat:
-        forward_id = message.forward_from_chat.id
-    elif message.forward_from:
-        forward_id = message.forward_from.id
+    forward_id = forward_source_id(message)
     if forward_id and forward_id in allow["forwards"]:
         return
     words = {match.group(0).lower() for match in WORD_RE.finditer(text)}
     reason = None
     if TELEGRAM_LINK_RE.search(text):
         reason = "Telegram link"
-    elif message.forward_from or message.forward_from_chat:
+    elif is_forwarded(message):
         reason = "forwarded message"
     elif words & await spam_words(message.chat.id):
         reason = "spam word"
