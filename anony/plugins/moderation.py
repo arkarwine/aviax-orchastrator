@@ -306,6 +306,14 @@ async def remote_action(chat_id: int, user_id: int, action: str, duration: int |
     return await verify_remote_state(chat_id, user_id, action)
 
 
+def iter_all_members(chat_id: int):
+    return app.get_chat_members(
+        chat_id,
+        limit=0,
+        filter=enums.ChatMembersFilter.RECENT,
+    )
+
+
 async def warn_user(chat_id: int, user_id: int, reason: str = "") -> tuple[int, int, str]:
     now = time.time()
     key = {"chat_id": chat_id, "user_id": user_id}
@@ -477,7 +485,7 @@ async def _remote_moderation(_, message: types.Message):
     )
     succeeded = failed = skipped = 0
     try:
-        async for member in app.get_chat_members(chat.id):
+        async for member in iter_all_members(chat.id):
             user = member.user
             if not user or user.is_bot or member.status in {enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER}:
                 skipped += 1
@@ -1110,7 +1118,7 @@ async def call_targets(chat_id: int, *, admins_only: bool, include_admins: bool,
         return admins[:limit] if limit else admins
 
     users = []
-    async for member in app.get_chat_members(chat_id):
+    async for member in iter_all_members(chat_id):
         user = member.user
         if not user or user.is_bot:
             continue
