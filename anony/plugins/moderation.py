@@ -25,6 +25,8 @@ CALL_EMOJIS = ["👋", "🔔", "🎵", "✨", "📣", "💬", "🎧", "⚡"]
 
 recent_messages: dict[tuple[int, int], deque] = defaultdict(lambda: deque(maxlen=20))
 call_tasks: dict[int, dict] = {}
+recent_welcomes: dict[tuple[int, int], float] = {}
+WELCOME_DEDUPE_SECONDS = 20
 
 GROUP_ONLY_COMMANDS = {
     "ban", "kick", "unban", "mute", "tmute", "unmute",
@@ -817,6 +819,14 @@ def is_join_transition(update: types.ChatMemberUpdated) -> bool:
 async def send_welcome(chat: types.Chat, user: types.User) -> None:
     if not enabled():
         return
+    now = time.time()
+    key = (chat.id, user.id)
+    for item, timestamp in list(recent_welcomes.items()):
+        if now - timestamp > WELCOME_DEDUPE_SECONDS:
+            recent_welcomes.pop(item, None)
+    if key in recent_welcomes:
+        return
+    recent_welcomes[key] = now
     settings = await chat_settings(chat.id)
     if not settings["welcome"]:
         return
