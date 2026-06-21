@@ -153,7 +153,11 @@ class Inline:
                         callback_data=f"controls pause {chat_id}",
                         style=enums.ButtonStyle.PRIMARY,
                     ),
-                    self.ikb(text="⥁", callback_data=f"controls replay {chat_id}"),
+                    self.ikb(
+                        text="⥁",
+                        callback_data=f"controls replay {chat_id}",
+                        style=enums.ButtonStyle.PRIMARY,
+                    ),
                     self.ikb(
                         text="‣‣I",
                         callback_data=f"controls skip {chat_id}",
@@ -171,14 +175,17 @@ class Inline:
                     self.ikb(
                         text="📋 Queue",
                         callback_data=f"controls queue {chat_id}",
+                        style=enums.ButtonStyle.PRIMARY,
                     ),
                     self.ikb(
                         text="🎵 Song",
                         callback_data=f"song_request {chat_id}",
+                        style=enums.ButtonStyle.PRIMARY,
                     ),
                     self.ikb(
                         text="🔁 Loop",
                         callback_data=f"controls loop {chat_id}",
+                        style=enums.ButtonStyle.PRIMARY,
                     ),
                 ]
             )
@@ -196,7 +203,7 @@ class Inline:
                     self.ikb(
                         text=f"↩️ {_lang['back']}",
                         callback_data="help back",
-                        style=enums.ButtonStyle.PRIMARY,
+                        style=enums.ButtonStyle.SUCCESS,
                     ),
                     self.ikb(
                         text=f"✖️ {_lang['close']}",
@@ -281,7 +288,7 @@ class Inline:
                     self.ikb("🧰 Utilities", callback_data="help mod_utils", style=enums.ButtonStyle.PRIMARY),
                 ],
                 [
-                    self.ikb(f"↩️ {_lang['back']}", callback_data="help back", style=enums.ButtonStyle.PRIMARY),
+                    self.ikb(f"↩️ {_lang['back']}", callback_data="help back", style=enums.ButtonStyle.SUCCESS),
                     self.ikb(f"✖️ {_lang['close']}", callback_data="help close", style=enums.ButtonStyle.DANGER),
                 ],
             ]
@@ -291,7 +298,7 @@ class Inline:
         return self.ikm(
             [
                 [
-                    self.ikb("↩️ Moderation", callback_data="help mod", style=enums.ButtonStyle.PRIMARY),
+                    self.ikb("↩️ Moderation", callback_data="help mod", style=enums.ButtonStyle.SUCCESS),
                     self.ikb(f"✖️ {_lang['close']}", callback_data="help close", style=enums.ButtonStyle.DANGER),
                 ]
             ]
@@ -341,7 +348,7 @@ class Inline:
                     self.ikb(
                         text="➡️ Next: Assistant Session",
                         url=f"https://t.me/{app.username}?start=addsession",
-                        style=enums.ButtonStyle.PRIMARY,
+                        style=enums.ButtonStyle.SUCCESS,
                     )
                 ]
             ]
@@ -472,7 +479,7 @@ class Inline:
                 self.ikb(
                     text=f"➕ {lang['add_me']}",
                     url=f"https://t.me/{app.username}?startgroup=true",
-                    style=enums.ButtonStyle.PRIMARY,
+                    style=enums.ButtonStyle.SUCCESS,
                 )
             ],
             [
@@ -484,7 +491,7 @@ class Inline:
                 self.ikb(
                     text=f"📊 {lang['help_7']}",
                     callback_data="stats",
-                    style=enums.ButtonStyle.PRIMARY,
+                    style=enums.ButtonStyle.DEFAULT,
                 ),
             ],
             [
@@ -496,7 +503,7 @@ class Inline:
                 self.ikb(
                     text=f"📣 {lang['channel']}",
                     url=config.SUPPORT_CHANNEL,
-                    style=enums.ButtonStyle.PRIMARY,
+                    style=enums.ButtonStyle.DANGER,
                 ),
             ],
         ]
@@ -506,7 +513,7 @@ class Inline:
                     self.ikb(
                         text="👤 Owner",
                         url=config.OWNER_LINK or f"tg://user?id={app.owner}",
-                        style=enums.ButtonStyle.PRIMARY,
+                        style=enums.ButtonStyle.DEFAULT,
                     )
                 ]
             ]
@@ -516,7 +523,7 @@ class Inline:
                     self.ikb(
                         text=f"🌍 {lang['language']}",
                         callback_data="language",
-                        style=enums.ButtonStyle.PRIMARY,
+                        style=enums.ButtonStyle.DEFAULT,
                     )
                 ]
             ]
@@ -529,7 +536,7 @@ class Inline:
                     self.ikb(
                         text="🔄 Refresh",
                         callback_data="stats refresh",
-                        style=enums.ButtonStyle.PRIMARY,
+                        style=enums.ButtonStyle.SUCCESS,
                     ),
                     self.ikb(
                         text="✖️ Close",
@@ -548,11 +555,12 @@ class Inline:
                 self.ikb(
                     text="🔄 Refresh",
                     callback_data=f"queue_request status {chat_id} {queue_id} {owner_id}",
-                    style=enums.ButtonStyle.PRIMARY,
+                    style=enums.ButtonStyle.SUCCESS,
                 ),
                 self.ikb(
                     text="📋 Queue",
                     callback_data=f"queue_request queue {chat_id} {queue_id} {owner_id}",
+                    style=enums.ButtonStyle.PRIMARY,
                 ),
                 self.ikb(
                     text="🗑 Remove",
@@ -582,11 +590,12 @@ class Inline:
                     self.ikb(
                         text="🔄 Check Status",
                         callback_data=f"maintenance status {chat_id} {maintenance_id} {owner_id}",
-                        style=enums.ButtonStyle.PRIMARY,
+                        style=enums.ButtonStyle.SUCCESS,
                     ),
                     self.ikb(
                         text="📋 View Saved",
                         callback_data=f"maintenance queue {chat_id} {maintenance_id} {owner_id}",
+                        style=enums.ButtonStyle.PRIMARY,
                     ),
                 ],
                 [

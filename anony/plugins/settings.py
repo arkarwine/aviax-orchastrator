@@ -164,6 +164,7 @@ async def _change_owner(_, m: types.Message):
                     types.InlineKeyboardButton(
                         "✖️ Cancel",
                         callback_data=f"owner_transfer cancel {token}",
+                        style=enums.ButtonStyle.DANGER,
                     )
                 ],
             ]
