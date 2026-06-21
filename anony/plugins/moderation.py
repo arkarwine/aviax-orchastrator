@@ -26,6 +26,25 @@ CALL_EMOJIS = ["👋", "🔔", "🎵", "✨", "📣", "💬", "🎧", "⚡"]
 recent_messages: dict[tuple[int, int], deque] = defaultdict(lambda: deque(maxlen=20))
 call_tasks: dict[int, dict] = {}
 
+GROUP_ONLY_COMMANDS = {
+    "ban", "kick", "unban", "mute", "tmute", "unmute",
+    "warn", "warns", "resetwarns", "setwarnslimit", "setwarnsaction",
+    "purge", "pin", "unpin", "unpinall", "cleanservice", "antichannelpin",
+    "antispam", "spamfilter", "delspamfilter", "spamfilters",
+    "spamallow", "delspamallow", "spamallowlist",
+    "filter", "delfilter", "filters", "note", "delnote", "notes",
+    "rules", "setrules", "resetrules", "welcome", "setwelcome",
+    "resetwelcome", "welcomeformat", "all", "callall", "call",
+    "calladmins", "anybody", "stopcall", "allstatus", "setall",
+    "admins", "report",
+}
+REMOTE_COMMANDS = {
+    "cban", "ckick", "cunban", "cmute", "ctban", "ctmute", "cunmute",
+    "cbanall", "cban_all", "ckickall", "ckick_all",
+    "ctbanall", "ctban_all", "cmuteall", "cmute_all",
+    "ctmuteall", "ctmute_all",
+}
+
 
 def enabled() -> bool:
     return bool(config.MODERATION_ENABLED)
@@ -166,6 +185,123 @@ async def unrestrict_user(chat_id: int, user_id: int) -> None:
     )
 
 
+def is_sudo_user(user_id: int | None) -> bool:
+    return bool(user_id and (user_id == app.owner or user_id in app.sudoers))
+
+
+async def resolve_chat(token: str) -> types.Chat:
+    chat_ref = int(token) if token.lstrip("-").isdigit() else token
+    return await app.get_chat(chat_ref)
+
+
+async def resolve_user(token: str) -> types.User:
+    user_ref = int(token) if token.lstrip("-").isdigit() else token
+    return await app.get_users(user_ref)
+
+
+async def remote_bot_permission(message: types.Message, chat_id: int, permission: str) -> bool:
+    try:
+        member = await app.get_chat_member(chat_id, app.id)
+    except Exception:
+        await message.reply_text(
+            "❌ I cannot check my permissions in that group.\n\n"
+            "💡 Make sure I am still in the group and promoted as admin."
+        )
+        return False
+    if member.status == enums.ChatMemberStatus.OWNER:
+        return True
+    if member.status != enums.ChatMemberStatus.ADMINISTRATOR:
+        await message.reply_text(
+            "⚠️ I am not an admin in that group.\n\n"
+            "💡 Promote me there first, then retry the remote command."
+        )
+        return False
+    if not getattr(member.privileges, permission, False):
+        await message.reply_text(
+            f"⚠️ I am missing <code>{permission}</code> in that group.\n\n"
+            "💡 Update my admin rights there, then retry."
+        )
+        return False
+    return True
+
+
+async def remote_target_allowed(chat_id: int, user: types.User) -> tuple[bool, str]:
+    if user.is_bot:
+        return False, "skipped bot account"
+    try:
+        member = await app.get_chat_member(chat_id, user.id)
+    except (errors.UserNotParticipant, errors.exceptions.bad_request_400.UserNotParticipant):
+        return True, ""
+    except errors.RPCError:
+        return True, ""
+    if member.status in {enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER}:
+        return False, "skipped group admin"
+    return True, ""
+
+
+async def flood_safe(method, *args, **kwargs):
+    while True:
+        try:
+            return await method(*args, **kwargs)
+        except errors.FloodWait as exc:
+            await asyncio.sleep(int(getattr(exc, "value", 5)) + 1)
+
+
+async def verify_remote_state(chat_id: int, user_id: int, action: str) -> bool:
+    try:
+        member = await app.get_chat_member(chat_id, user_id)
+    except (errors.UserNotParticipant, errors.exceptions.bad_request_400.UserNotParticipant):
+        return action in {"kick", "unban"}
+    except errors.RPCError:
+        return False
+    if action in {"ban", "tban"}:
+        return member.status == enums.ChatMemberStatus.BANNED
+    if action == "kick":
+        return member.status in {enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.BANNED}
+    if action == "unban":
+        return member.status != enums.ChatMemberStatus.BANNED
+    if action in {"mute", "tmute"}:
+        return member.status == enums.ChatMemberStatus.RESTRICTED or not getattr(member.permissions, "can_send_messages", True)
+    if action == "unmute":
+        return member.status != enums.ChatMemberStatus.RESTRICTED
+    return False
+
+
+async def remote_action(chat_id: int, user_id: int, action: str, duration: int | None = None) -> bool:
+    until = datetime.now(timezone.utc) + timedelta(seconds=duration) if duration else None
+    if action in {"ban", "tban"}:
+        await flood_safe(app.ban_chat_member, chat_id, user_id, until_date=until)
+    elif action == "kick":
+        await flood_safe(app.ban_chat_member, chat_id, user_id)
+        await flood_safe(app.unban_chat_member, chat_id, user_id)
+    elif action == "unban":
+        await flood_safe(app.unban_chat_member, chat_id, user_id)
+    elif action in {"mute", "tmute"}:
+        await flood_safe(app.restrict_chat_member, chat_id, user_id, types.ChatPermissions(), until_date=until)
+    elif action == "unmute":
+        await flood_safe(
+            app.restrict_chat_member,
+            chat_id,
+            user_id,
+            types.ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=True,
+                can_send_documents=True,
+                can_send_photos=True,
+                can_send_videos=True,
+                can_send_video_notes=True,
+                can_send_voice_notes=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+                can_invite_users=True,
+            ),
+        )
+    else:
+        return False
+    return await verify_remote_state(chat_id, user_id, action)
+
+
 async def warn_user(chat_id: int, user_id: int, reason: str = "") -> tuple[int, int, str]:
     now = time.time()
     key = {"chat_id": chat_id, "user_id": user_id}
@@ -195,6 +331,220 @@ async def apply_warn_limit(message: types.Message, user_id: int, action: str) ->
         return "muted for 30 days"
     await app.ban_chat_member(message.chat.id, user_id)
     return "banned"
+
+
+def remote_usage(command: str) -> str:
+    usages = {
+        "cban": "/cban <chat> <user> [reason]",
+        "ckick": "/ckick <chat> <user> [reason]",
+        "cunban": "/cunban <chat> <user> [reason]",
+        "cmute": "/cmute <chat> <user> [reason]",
+        "ctban": "/ctban <chat> <user> <duration> [reason]",
+        "ctmute": "/ctmute <chat> <user> <duration> [reason]",
+        "cunmute": "/cunmute <chat> <user> [reason]",
+        "cbanall": "/cbanall <chat> [reason]",
+        "ckickall": "/ckickall <chat> [reason]",
+        "ctbanall": "/ctbanall <chat> <duration> [reason]",
+        "cmuteall": "/cmuteall <chat> [reason]",
+        "ctmuteall": "/ctmuteall <chat> <duration> [reason]",
+    }
+    return usages.get(command.replace("_", ""), "/cban <chat> <user> [reason]")
+
+
+def remote_action_name(command: str) -> str:
+    command = command.replace("_", "")
+    if command in {"ctban", "ctbanall"}:
+        return "tban"
+    if command in {"ctmute", "ctmuteall"}:
+        return "tmute"
+    if command.startswith("c"):
+        return command[1:].removesuffix("all")
+    return command
+
+
+async def remote_command_allowed(message: types.Message) -> bool:
+    if not enabled():
+        await message.reply_text(
+            "🧩 Moderation tools are not enabled for this bot.\n\n"
+            "💡 The manager can enable them with <code>/setbotfeature &lt;deployment&gt; moderation on</code>."
+        )
+        return False
+    if not is_sudo_user(message.from_user.id if message.from_user else None):
+        await message.reply_text(
+            "🔒 Remote moderation is sudo-only.\n\n"
+            "💡 Ask the bot owner to add you as sudo if you should manage groups remotely."
+        )
+        return False
+    return True
+
+
+async def parse_remote_chat(message: types.Message, command: str) -> types.Chat | None:
+    if len(message.command) < 2:
+        await message.reply_text(f"⚙️ Usage: <code>{remote_usage(command)}</code>")
+        return None
+    try:
+        return await resolve_chat(message.command[1])
+    except Exception:
+        await message.reply_text(
+            "❌ I could not find that chat.\n\n"
+            "💡 Use a chat ID like <code>-100123...</code> or a public @username where the bot is present."
+        )
+        return None
+
+
+@app.on_message(filters.command(list(REMOTE_COMMANDS)) & ~app.bl_users)
+async def _remote_moderation(_, message: types.Message):
+    command = message.command[0].lower()
+    normalized = command.replace("_", "")
+    if not await remote_command_allowed(message):
+        return
+    chat = await parse_remote_chat(message, normalized)
+    if not chat:
+        return
+    action = remote_action_name(normalized)
+    duration = None
+    if normalized in {"ctban", "ctmute"}:
+        if len(message.command) < 4:
+            return await message.reply_text(f"⚙️ Usage: <code>{remote_usage(normalized)}</code>")
+        duration = parse_duration(message.command[3])
+        if not duration:
+            return await message.reply_text("⏱️ Duration must look like <code>10m</code>, <code>2h</code>, <code>7d</code>, or <code>1w</code>.")
+        user_index = 2
+        reason = " ".join(message.command[4:]) or "No reason provided"
+    elif normalized in {"ctbanall", "ctmuteall"}:
+        if len(message.command) < 3:
+            return await message.reply_text(f"⚙️ Usage: <code>{remote_usage(normalized)}</code>")
+        duration = parse_duration(message.command[2])
+        if not duration:
+            return await message.reply_text("⏱️ Duration must look like <code>10m</code>, <code>2h</code>, <code>7d</code>, or <code>1w</code>.")
+        user_index = None
+        reason = " ".join(message.command[3:]) or "No reason provided"
+    else:
+        user_index = 2 if not normalized.endswith("all") else None
+        reason = " ".join(message.command[3 if user_index else 2:]) or "No reason provided"
+
+    if action in {"ban", "tban", "kick", "mute", "tmute", "unmute"}:
+        permission = "can_restrict_members"
+    elif action == "unban":
+        permission = "can_restrict_members"
+    else:
+        return await message.reply_text(f"❌ Unsupported remote action: <code>{html.escape(action)}</code>")
+    if not await remote_bot_permission(message, chat.id, permission):
+        return
+
+    if user_index is not None:
+        if len(message.command) <= user_index:
+            return await message.reply_text(f"⚙️ Usage: <code>{remote_usage(normalized)}</code>")
+        try:
+            user = await resolve_user(message.command[user_index])
+        except Exception:
+            return await message.reply_text("❌ I could not resolve that user. Use a user ID or @username.")
+        if action not in {"unban", "unmute"}:
+            allowed, why = await remote_target_allowed(chat.id, user)
+            if not allowed:
+                return await message.reply_text(f"🛡️ No action taken: {why}.")
+        status = await message.reply_text(
+            f"🛰️ Applying <code>{action}</code> in <b>{html.escape(chat.title or str(chat.id))}</b>..."
+        )
+        try:
+            success = await remote_action(chat.id, user.id, action, duration)
+        except errors.RPCError as exc:
+            return await status.edit_text(
+                f"❌ Telegram rejected the remote action.\n\n"
+                f"📍 Chat: <code>{chat.id}</code>\n"
+                f"👤 User: <code>{user.id}</code>\n"
+                f"⚙️ Error: <code>{type(exc).__name__}</code>"
+            )
+        if not success:
+            return await status.edit_text(
+                "⚠️ I attempted the action, but Telegram did not report the expected final state.\n\n"
+                "💡 Check the target user's current status and my admin permissions in that group."
+            )
+        return await status.edit_text(
+            f"✅ Remote action complete.\n\n"
+            f"📍 Chat: <code>{chat.id}</code>\n"
+            f"👤 User: <code>{user.id}</code>\n"
+            f"🛠️ Action: <code>{action}</code>\n"
+            f"📝 Reason: {html.escape(reason)}"
+        )
+
+    status = await message.reply_text(
+        f"🛰️ Preparing bulk <code>{action}</code> in <b>{html.escape(chat.title or str(chat.id))}</b>..."
+    )
+    succeeded = failed = skipped = 0
+    try:
+        async for member in app.get_chat_members(chat.id):
+            user = member.user
+            if not user or user.is_bot or member.status in {enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER}:
+                skipped += 1
+                continue
+            try:
+                if await remote_action(chat.id, user.id, action, duration):
+                    succeeded += 1
+                else:
+                    failed += 1
+            except errors.RPCError:
+                failed += 1
+            if (succeeded + failed + skipped) % 15 == 0:
+                await status.edit_text(
+                    f"🛰️ Bulk <code>{action}</code> running...\n\n"
+                    f"✅ Succeeded: <code>{succeeded}</code>\n"
+                    f"❌ Failed: <code>{failed}</code>\n"
+                    f"🛡️ Skipped admins/bots: <code>{skipped}</code>"
+                )
+            await asyncio.sleep(0.7)
+    except errors.ChatAdminRequired:
+        return await status.edit_text("⚠️ I need admin access to enumerate members in that group.")
+    except errors.RPCError as exc:
+        return await status.edit_text(f"❌ Bulk action stopped: <code>{type(exc).__name__}</code>")
+
+    await status.edit_text(
+        f"✅ Bulk remote action complete.\n\n"
+        f"📍 Chat: <code>{chat.id}</code>\n"
+        f"🛠️ Action: <code>{action}</code>\n"
+        f"✅ Succeeded: <code>{succeeded}</code>\n"
+        f"❌ Failed: <code>{failed}</code>\n"
+        f"🛡️ Skipped admins/bots: <code>{skipped}</code>\n"
+        f"📝 Reason: {html.escape(reason)}"
+    )
+
+
+@app.on_message(filters.private & filters.command(list(GROUP_ONLY_COMMANDS)) & ~app.bl_users)
+async def _group_only_feedback(_, message: types.Message):
+    if not enabled():
+        return
+    command = message.command[0].lower()
+    await message.reply_text(
+        f"👥 <code>/{command}</code> works in groups only.\n\n"
+        "💡 Use it inside the target group because it needs that group's chat context, admin list, and settings.\n"
+        "🛰️ If you are sudo and want to act from DM, use remote moderation commands like "
+        "<code>/cban &lt;chat&gt; &lt;user&gt; [reason]</code>."
+    )
+
+
+@app.on_message(filters.private & filters.command(["id", "info"]) & ~app.bl_users)
+async def _private_utilities(_, message: types.Message):
+    command = message.command[0].lower()
+    user = message.from_user
+    if command == "info" and len(message.command) > 1:
+        try:
+            user = await resolve_user(message.command[1])
+        except Exception:
+            return await message.reply_text("❌ I could not resolve that user. Use a user ID or @username.")
+    if command == "id":
+        return await message.reply_text(
+            f"🆔 <b>IDs</b>\n\n"
+            f"👤 User: <code>{user.id}</code>\n"
+            f"💬 Chat: <code>{message.chat.id}</code>\n"
+            f"📨 Message: <code>{message.id}</code>"
+        )
+    await message.reply_text(
+        f"👤 <b>User info</b>\n\n"
+        f"• Name: {user.mention}\n"
+        f"• ID: <code>{user.id}</code>\n"
+        f"• Bot: <code>{'yes' if user.is_bot else 'no'}</code>\n"
+        f"• Username: <code>{html.escape('@' + user.username if user.username else 'none')}</code>"
+    )
 
 
 @app.on_message(filters.command(["ban", "kick", "unban"]) & filters.group & ~app.bl_users)

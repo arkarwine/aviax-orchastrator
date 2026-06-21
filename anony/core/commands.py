@@ -13,6 +13,8 @@ PUBLIC_PRIVATE_COMMANDS = [
     ("stats", "View service and usage statistics"),
     ("ping", "Check whether the bot is responsive"),
     ("language", "Choose your preferred language"),
+    ("id", "Show your Telegram ID"),
+    ("info", "Show your account info"),
 ]
 
 PUBLIC_GROUP_COMMANDS = [
@@ -88,7 +90,22 @@ MODERATION_GROUP_COMMANDS = [
     ("report", "Report a message to admins"),
 ]
 
-SUDO_PRIVATE_COMMANDS = PUBLIC_PRIVATE_COMMANDS + [
+REMOTE_MODERATION_COMMANDS = [
+    ("cban", "Ban a user from a remote group"),
+    ("ckick", "Kick a user from a remote group"),
+    ("cunban", "Unban a user from a remote group"),
+    ("cmute", "Mute a user in a remote group"),
+    ("ctban", "Temporarily ban a user remotely"),
+    ("ctmute", "Temporarily mute a user remotely"),
+    ("cunmute", "Unmute a user in a remote group"),
+    ("cbanall", "Bulk-ban remote group members"),
+    ("ckickall", "Bulk-kick remote group members"),
+    ("ctbanall", "Bulk temporary-ban remote group members"),
+    ("cmuteall", "Bulk-mute remote group members"),
+    ("ctmuteall", "Bulk temporary-mute remote group members"),
+]
+
+BASE_SUDO_PRIVATE_COMMANDS = PUBLIC_PRIVATE_COMMANDS + [
     ("activevc", "View active voice chats"),
     ("broadcast", "Broadcast a replied message"),
     ("schedulebroadcast", "Schedule a text broadcast"),
@@ -118,12 +135,23 @@ SUDO_PRIVATE_COMMANDS = PUBLIC_PRIVATE_COMMANDS + [
     ("removesession", "Remove an assistant session"),
 ]
 
-OWNER_PRIVATE_COMMANDS = SUDO_PRIVATE_COMMANDS + [
+OWNER_EXTRA_COMMANDS = [
     ("changeowner", "Transfer bot ownership"),
     ("addsudo", "Grant sudo access to a user"),
     ("delsudo", "Remove sudo access from a user"),
     ("eval", "Execute Python code as the owner"),
 ]
+
+
+def sudo_private_commands() -> list[tuple[str, str]]:
+    commands = list(BASE_SUDO_PRIVATE_COMMANDS)
+    if config.MODERATION_ENABLED:
+        commands.extend(REMOTE_MODERATION_COMMANDS)
+    return commands
+
+
+def owner_private_commands() -> list[tuple[str, str]]:
+    return sudo_private_commands() + OWNER_EXTRA_COMMANDS
 
 
 def command_list(items: list[tuple[str, str]]) -> list[types.BotCommand]:
@@ -138,7 +166,7 @@ def group_commands() -> list[tuple[str, str]]:
 
 
 async def set_user_command_menu(user_id: int, *, owner: bool = False) -> None:
-    commands = OWNER_PRIVATE_COMMANDS if owner else SUDO_PRIVATE_COMMANDS
+    commands = owner_private_commands() if owner else sudo_private_commands()
     await app.set_bot_commands(
         command_list(commands),
         scope=types.BotCommandScopeChat(chat_id=user_id),

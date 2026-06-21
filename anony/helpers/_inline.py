@@ -66,6 +66,22 @@ MODERATION_HELP = {
         "/stopcall\n"
         "/setall batch|delay|hidden|admins value"
     ),
+    "mod_remote": (
+        "🛰️ <u><b>Remote Moderation</b></u>\n"
+        "<i>Sudo-only. Use when you need to moderate a group without issuing the command there.</i>\n\n"
+        "/cban chat user reason\n"
+        "/ckick chat user reason\n"
+        "/cunban chat user reason\n"
+        "/cmute chat user reason\n"
+        "/ctban chat user 1h reason\n"
+        "/ctmute chat user 30m reason\n"
+        "/cunmute chat user reason\n\n"
+        "/cbanall chat reason\n"
+        "/ckickall chat reason\n"
+        "/ctbanall chat 1h reason\n"
+        "/cmuteall chat reason\n"
+        "/ctmuteall chat 30m reason"
+    ),
     "mod_utils": (
         "🧰 <u><b>Group Utilities</b></u>\n"
         "<i>Small group helpers that are useful during moderation.</i>\n\n"
@@ -233,8 +249,6 @@ class Inline:
                     style=(
                         enums.ButtonStyle.DANGER
                         if cb == "sudo"
-                        else enums.ButtonStyle.SUCCESS
-                        if cb == "mod"
                         else enums.ButtonStyle.PRIMARY
                     ),
                 )
@@ -253,14 +267,17 @@ class Inline:
             [
                 [
                     self.ikb("🛡️ Moderation", callback_data="help mod_core", style=enums.ButtonStyle.PRIMARY),
-                    self.ikb("🧹 Anti-Spam", callback_data="help mod_spam", style=enums.ButtonStyle.SUCCESS),
+                    self.ikb("🧹 Anti-Spam", callback_data="help mod_spam", style=enums.ButtonStyle.PRIMARY),
                 ],
                 [
                     self.ikb("🗒️ Notes", callback_data="help mod_notes", style=enums.ButtonStyle.PRIMARY),
                     self.ikb("👋 Welcome", callback_data="help mod_welcome", style=enums.ButtonStyle.PRIMARY),
                 ],
                 [
-                    self.ikb("📣 Mentions", callback_data="help mod_mentions", style=enums.ButtonStyle.SUCCESS),
+                    self.ikb("📣 Mentions", callback_data="help mod_mentions", style=enums.ButtonStyle.PRIMARY),
+                    self.ikb("🛰️ Remote", callback_data="help mod_remote", style=enums.ButtonStyle.PRIMARY),
+                ],
+                [
                     self.ikb("🧰 Utilities", callback_data="help mod_utils", style=enums.ButtonStyle.PRIMARY),
                 ],
                 [
@@ -324,7 +341,7 @@ class Inline:
                     self.ikb(
                         text="➡️ Next: Assistant Session",
                         url=f"https://t.me/{app.username}?start=addsession",
-                        style=enums.ButtonStyle.SUCCESS,
+                        style=enums.ButtonStyle.PRIMARY,
                     )
                 ]
             ]
@@ -342,7 +359,7 @@ class Inline:
                     self.ikb(
                         text="🔑 Session String",
                         callback_data="setup_session string",
-                        style=enums.ButtonStyle.SUCCESS,
+                        style=enums.ButtonStyle.PRIMARY,
                     ),
                 ],
                 [
@@ -455,7 +472,7 @@ class Inline:
                 self.ikb(
                     text=f"➕ {lang['add_me']}",
                     url=f"https://t.me/{app.username}?startgroup=true",
-                    style=enums.ButtonStyle.SUCCESS,
+                    style=enums.ButtonStyle.PRIMARY,
                 )
             ],
             [
@@ -467,7 +484,7 @@ class Inline:
                 self.ikb(
                     text=f"📊 {lang['help_7']}",
                     callback_data="stats",
-                    style=enums.ButtonStyle.SUCCESS,
+                    style=enums.ButtonStyle.PRIMARY,
                 ),
             ],
             [
@@ -512,7 +529,7 @@ class Inline:
                     self.ikb(
                         text="🔄 Refresh",
                         callback_data="stats refresh",
-                        style=enums.ButtonStyle.SUCCESS,
+                        style=enums.ButtonStyle.PRIMARY,
                     ),
                     self.ikb(
                         text="✖️ Close",
