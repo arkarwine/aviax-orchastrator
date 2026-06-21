@@ -110,6 +110,16 @@ class HealthReporter:
             data["user_id"] = user_id
             return data
 
+        async def set_runtime_config(payload: dict) -> dict:
+            key = str(payload.get("key") or "").upper()
+            if key != "MODERATION_ENABLED":
+                raise ValueError("unsupported runtime config key")
+            value = bool(payload.get("value"))
+            await db.set_config(key, value)
+            config.apply_runtime_config({key: value})
+            warnings = await asyncio.wait_for(sync_command_menus(set(app.sudoers)), timeout=45)
+            return {"key": key, "value": value, "warnings": warnings}
+
         async def change_owner(payload: dict) -> dict:
             user_id = int(payload.get("user_id") or 0)
             if user_id <= 0:
@@ -155,6 +165,7 @@ class HealthReporter:
             "check_setup": check_setup,
             "add_sudoer": add_sudoer,
             "del_sudoer": del_sudoer,
+            "set_runtime_config": set_runtime_config,
             "change_owner": change_owner,
             "broadcast_text": broadcast_text,
         }
@@ -177,7 +188,7 @@ class HealthReporter:
                     "success": True,
                     "data": (
                         await handler(payload)
-                        if operation in {"add_sudoer", "del_sudoer", "change_owner", "broadcast_text"}
+                        if operation in {"add_sudoer", "del_sudoer", "set_runtime_config", "change_owner", "broadcast_text"}
                         else await handler()
                     ),
                 })

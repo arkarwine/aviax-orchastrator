@@ -21,6 +21,7 @@ VALID_KEYS = [
     "AUTO_END",
     "THUMB_GEN",
     "VIDEO_PLAY",
+    "MODERATION_ENABLED",
     "LANG_CODE",
     "DEFAULT_THUMB",
     "PING_IMG",
@@ -32,7 +33,7 @@ VALID_KEYS = [
     "MAINTENANCE_GRACE_MINUTES",
     "USER_QUEUE_LIMIT",
 ]
-BOOL_KEYS = {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY"}
+BOOL_KEYS = {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY", "MODERATION_ENABLED"}
 RESTART_REQUIRED_KEYS = {
     "API_ID",
     "API_HASH",
@@ -431,6 +432,7 @@ async def _settings(_, m: types.Message):
             "• auto_end (true/false)\n"
             "• thumb_gen (true/false)\n"
             "• video_play (true/false)\n"
+            "• moderation_enabled (true/false; normally managed from the manager)\n"
             "• duration_limit (minutes, 1-10080)\n"
             "• maintenance_grace_minutes (0-1440)\n"
             "• user_queue_limit (1-100)\n"
@@ -467,7 +469,7 @@ async def _settings(_, m: types.Message):
         )
     if key not in VALID_KEYS:
         return await m.reply_text(
-            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, duration_limit, maintenance_grace_minutes, user_queue_limit, lang_code, default_thumb, ping_img, start_img, owner_link, cookies_path, cookies_url"
+            "❌ Invalid key. Available keys: auto_leave, auto_end, thumb_gen, video_play, moderation_enabled, duration_limit, maintenance_grace_minutes, user_queue_limit, lang_code, default_thumb, ping_img, start_img, owner_link, cookies_path, cookies_url"
         )
 
     if len(m.command) == 2:
@@ -624,6 +626,7 @@ async def _reset_setting(_, m: types.Message):
     
     valid_keys = {
         "AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY",
+        "MODERATION_ENABLED",
         "LANG_CODE", "DEFAULT_THUMB", "PING_IMG", "START_IMG", "OWNER_LINK",
         "COOKIES_URL", "COOKIES_PATH",
         "DURATION_LIMIT",
@@ -633,7 +636,7 @@ async def _reset_setting(_, m: types.Message):
     
     if key not in valid_keys:
         return await m.reply_text(
-            "❌ Invalid setting key. Available keys: auto_leave, auto_end, thumb_gen, video_play, duration_limit, maintenance_grace_minutes, user_queue_limit, lang_code, default_thumb, ping_img, start_img, owner_link, cookies_path, cookies_url"
+            "❌ Invalid setting key. Available keys: auto_leave, auto_end, thumb_gen, video_play, moderation_enabled, duration_limit, maintenance_grace_minutes, user_queue_limit, lang_code, default_thumb, ping_img, start_img, owner_link, cookies_path, cookies_url"
         )
     
     original_value = config._runtime_defaults.get(key)

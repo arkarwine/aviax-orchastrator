@@ -70,6 +70,7 @@ DEPLOYMENT_ENV_KEYS = {
     "AUTO_END",
     "THUMB_GEN",
     "VIDEO_PLAY",
+    "MODERATION_ENABLED",
     "COOKIES_URL",
 }
 
@@ -354,6 +355,7 @@ def env_from_template(**values: str) -> Dict[str, str]:
         "AUTO_END": "False",
         "THUMB_GEN": "True",
         "VIDEO_PLAY": "True",
+        "MODERATION_ENABLED": "False",
         "LANG_CODE": "en",
     }
     for key, default in (
@@ -385,6 +387,7 @@ def handler_errors(func):
             "add_bot_sudo",
             "bot_sudo_list",
             "change_bot_owner",
+            "set_bot_feature",
             "cancel_restart",
             "change_database",
             "delete",
@@ -587,6 +590,11 @@ class BotManager:
         self.app.on_message(
             filters.private & filters.command("botsudolist") & self.authorized_filter
         )(self.bot_sudo_list)
+        self.app.on_message(
+            filters.private
+            & filters.command(["setbotfeature", "botfeature"])
+            & self.authorized_filter
+        )(self.set_bot_feature)
 
     @handler_errors
     async def start(self, client: Client, message: Message) -> None:
@@ -618,6 +626,7 @@ class BotManager:
             "📣 /broadcast [-user] [-nochat] [-owners] &lt;text&gt; - Broadcast through deployed bots or directly to deployed owners. Owner only.\n"
             "🛡️ /addbotsudo &lt;deployment&gt; &lt;user_id&gt; - Add a deployed-bot sudo user and refresh it live.\n"
             "👑 /changebotowner &lt;deployment&gt; &lt;user_id&gt; [keep|remove] - Change a deployed bot owner.\n"
+            "🧩 /setbotfeature &lt;deployment&gt; moderation on|off - Opt a deployed bot into optional moderation features.\n"
             "🚫 /delbotsudo &lt;deployment&gt; &lt;user_id&gt; - Remove a deployed-bot sudo user and refresh it live.\n"
             "👥 /botsudolist &lt;deployment&gt; - View a deployed bot's sudo users.\n",
             reply_parameters=ReplyParameters(message_id=message.id),
@@ -1394,6 +1403,108 @@ class BotManager:
             f"🧭 Previous owner source: <code>{html.escape(previous_source)}</code>\n\n"
             f"{activation}{env_warning}"
         )
+
+    @handler_errors
+    async def set_bot_feature(self, client: Client, message: Message) -> None:
+        args = message.text.split(maxsplit=3)
+        if len(args) < 4:
+            return await message.reply_text(
+                "🧩 Usage: <code>/setbotfeature &lt;deployment&gt; moderation on|off</code>\n\n"
+                "💡 Optional features are disabled by default. This command opts a specific deployed bot in or out.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        name = normalize_name(args[1])
+        feature = args[2].strip().lower()
+        value_text = args[3].strip().lower()
+        if feature not in {"moderation", "mod"}:
+            return await message.reply_text(
+                "❌ Unknown feature.\n\n"
+                "💡 Available feature: <code>moderation</code>",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        if value_text not in {"on", "off", "true", "false", "enable", "disable", "enabled", "disabled", "1", "0"}:
+            return await message.reply_text(
+                "❌ Feature state must be <code>on</code> or <code>off</code>.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+        enabled = value_text in {"on", "true", "enable", "enabled", "1"}
+
+        deployment = self.store.get(name)
+        if not deployment:
+            return await message.reply_text(
+                f"❌ Deployment <b>{name}</b> was not found. Use <code>/list</code> to check names.",
+                reply_parameters=ReplyParameters(message_id=message.id),
+            )
+
+        status = await message.reply_text(
+            f"🧩 Setting <b>moderation</b> to <code>{'on' if enabled else 'off'}</code> for <b>{deployment.name}</b>...",
+            reply_parameters=ReplyParameters(message_id=message.id),
+        )
+
+        mongo = None
+        try:
+            mongo, database, env = self.deployment_database(deployment)
+            await mongo.admin.command("ping")
+            values = {"settings.MODERATION_ENABLED": enabled}
+            if env.get("MANAGED_SETUP", "").strip().lower() in {"true", "1", "yes", "on"} and env.get("DEPLOYMENT_ID"):
+                values["settings.DEPLOYMENT_ID"] = env["DEPLOYMENT_ID"]
+            await database.cache.update_one(
+                {"_id": "runtime_config"},
+                {"$set": values},
+                upsert=True,
+            )
+        except Exception:
+            logger.exception("Could not persist feature flag for %s", deployment.name)
+            return await status.edit_text(
+                "❌ I could not save that feature setting.\n\n"
+                "💡 Check the deployment database configuration and try again."
+            )
+        finally:
+            if mongo is not None:
+                await mongo.close()
+
+        env_warning = ""
+        env_path = deployment.deployment_path / ".env"
+        if env_path.exists():
+            try:
+                env_vars = self.load_deployment_env(env_path)
+                env_vars["MODERATION_ENABLED"] = "True" if enabled else "False"
+                temporary = env_path.with_name(".env.tmp")
+                temporary.write_text(
+                    "\n".join(f"{key}={value}" for key, value in env_vars.items()),
+                    encoding="utf-8",
+                )
+                temporary.replace(env_path)
+            except Exception:
+                logger.exception("Could not update MODERATION_ENABLED in .env for %s", deployment.name)
+                env_warning = "\n⚠️ Saved in Mongo, but <code>.env</code> could not be updated."
+
+        runtime_success, runtime_detail, runtime_data = await self.request_runtime_control(
+            deployment,
+            "set_runtime_config",
+            {"key": "MODERATION_ENABLED", "value": enabled},
+        )
+        live = bool(runtime_success and bool(runtime_data.get("value")) == enabled)
+        live_text = (
+            f"⚡ Applied live: {html.escape(runtime_detail)}."
+            if live
+            else f"⚠️ Saved, but not applied live because {html.escape(runtime_detail)}. Restart the deployment or run <code>/refreshconfig</code>."
+        )
+        self.audit.record(
+            "set_bot_feature",
+            issuer_id=message.from_user.id if message.from_user else None,
+            deployment=deployment.name,
+            result="enabled" if enabled else "disabled",
+            detail="moderation",
+        )
+        await status.edit_text(
+            f"✅ <b>Moderation feature {'enabled' if enabled else 'disabled'} for {deployment.name}.</b>\n\n"
+            f"🧩 Feature: <code>moderation</code>\n"
+            f"🎚️ State: <code>{'on' if enabled else 'off'}</code>\n"
+            f"{live_text}{env_warning}"
+        )
+
     @handler_errors
     async def del_bot_sudo(self, client: Client, message: Message) -> None:
         deployment, user_id, error = self.parse_bot_sudo_args(message, "delbotsudo")

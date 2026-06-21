@@ -160,6 +160,13 @@ async def song_request_callback(_, query: types.CallbackQuery):
             reply_to_message_id=query.message.id,
         )
     except Exception:
+        from anony import logger
+
+        logger.exception(
+            "Could not prepare song MP3 from callback chat=%s media=%s",
+            chat_id,
+            getattr(media, "id", "unknown"),
+        )
         return await status.edit_text(
             "❌ I could not prepare the MP3 for this song. Please try again shortly."
         )

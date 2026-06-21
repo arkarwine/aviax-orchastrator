@@ -30,7 +30,7 @@ class Config:
         "API_URL", "VIDEO_API_URL", "API_KEY", "AUTO_LEAVE", "AUTO_END",
         "THUMB_GEN", "VIDEO_PLAY", "LANG_CODE", "COOKIES_URL", "DEFAULT_THUMB",
         "PING_IMG", "START_IMG",
-        "LOGGING_DISABLED",
+        "LOGGING_DISABLED", "MODERATION_ENABLED",
     }
 
     def __init__(self, values: dict | None = None):
@@ -78,6 +78,7 @@ class Config:
 
         self.THUMB_GEN = self.boolean("THUMB_GEN", True)
         self.VIDEO_PLAY = self.boolean("VIDEO_PLAY", True)
+        self.MODERATION_ENABLED = self.boolean("MODERATION_ENABLED", False)
 
         self.LANG_CODE = self.value("LANG_CODE", "en")
 
@@ -97,6 +98,7 @@ class Config:
             "AUTO_END": self.AUTO_END,
             "THUMB_GEN": self.THUMB_GEN,
             "VIDEO_PLAY": self.VIDEO_PLAY,
+            "MODERATION_ENABLED": self.MODERATION_ENABLED,
             "LANG_CODE": self.LANG_CODE,
             "DEFAULT_THUMB": self.DEFAULT_THUMB,
             "PING_IMG": self.PING_IMG,
@@ -165,7 +167,7 @@ class Config:
                     ]
                 else:
                     self.COOKIES_URL = value or []
-            elif key in {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY", "LOGGING_DISABLED"}:
+            elif key in {"AUTO_LEAVE", "AUTO_END", "THUMB_GEN", "VIDEO_PLAY", "LOGGING_DISABLED", "MODERATION_ENABLED"}:
                 self.__dict__[key] = parse_bool(value)
             elif key == "API_KEY":
                 self.API_KEY = value if value else None

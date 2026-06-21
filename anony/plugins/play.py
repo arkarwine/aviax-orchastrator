@@ -141,7 +141,7 @@ async def ensure_song_mp3(media) -> Path:
 
     title = getattr(media, "title", None) or source_path.stem
     artist = media_artist(media)
-    temp_path = export_path.with_suffix(".mp3.part")
+    temp_path = export_path.with_name(f"{export_path.stem}.tmp.mp3")
     temp_path.unlink(missing_ok=True)
 
     command = [
