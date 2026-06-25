@@ -21,6 +21,7 @@ class Queue:
     def __init__(self):
         self.queues: dict[int, deque[MediaItem]] = defaultdict(deque)
         self.deferred: dict[int, deque[MediaItem]] = defaultdict(deque)
+        self.interrupted: set[int] = set()
         self.deferred_path = Path.cwd() / ".maintenance-queue.json"
         self.live_path = Path.cwd() / ".playback-queue.json"
         self._deferred_persist_lock = threading.RLock()
@@ -43,10 +44,7 @@ class Queue:
         if isinstance(value, bytes):
             return value.decode("utf-8", errors="replace")
         if isinstance(value, dict):
-            return {
-                str(key): Queue._json_safe(item)
-                for key, item in value.items()
-            }
+            return {str(key): Queue._json_safe(item) for key, item in value.items()}
         if isinstance(value, (list, tuple, set, deque)):
             return [Queue._json_safe(item) for item in value]
         return str(value)
@@ -109,7 +107,9 @@ class Queue:
                     if items
                 }
                 temporary = self.live_path.with_suffix(".json.tmp")
-                temporary.write_text(json.dumps(data, ensure_ascii=True), encoding="utf-8")
+                temporary.write_text(
+                    json.dumps(data, ensure_ascii=True), encoding="utf-8"
+                )
                 temporary.replace(self.live_path)
             except Exception:
                 # The next queue mutation retries persistence without blocking playback.
@@ -121,10 +121,9 @@ class Queue:
             for chat_id, items in data.items():
                 recovered = [self._deserialize(item) for item in items]
                 if recovered:
-                    self.deferred[int(chat_id)] = deque(
-                        [*recovered, *self.deferred[int(chat_id)]]
-                    )
-            self.save_deferred()
+                    chat_key = int(chat_id)
+                    self.queues[chat_key] = deque(recovered)
+                    self.interrupted.add(chat_key)
             self.live_path.unlink(missing_ok=True)
         except FileNotFoundError:
             return
@@ -145,7 +144,9 @@ class Queue:
             return
         except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
             try:
-                self.deferred_path.replace(self.deferred_path.with_suffix(".invalid.json"))
+                self.deferred_path.replace(
+                    self.deferred_path.with_suffix(".invalid.json")
+                )
             except OSError:
                 pass
 
@@ -169,6 +170,15 @@ class Queue:
 
     def get_deferred(self, chat_id: int) -> list[MediaItem]:
         return list(self.deferred[chat_id])
+
+    def interrupted_chats(self) -> list[int]:
+        return [chat_id for chat_id in self.interrupted if self.queues[chat_id]]
+
+    def is_interrupted(self, chat_id: int) -> bool:
+        return chat_id in self.interrupted and bool(self.queues[chat_id])
+
+    def clear_interrupted(self, chat_id: int) -> None:
+        self.interrupted.discard(chat_id)
 
     def deferred_chats(self) -> list[int]:
         return [chat_id for chat_id, items in self.deferred.items() if items]
@@ -295,11 +305,14 @@ class Queue:
     def get_next(self, chat_id: int, check: bool = False) -> MediaItem | None:
         """Remove current item and return the next one, or None if empty."""
         if not self.queues[chat_id]:
+            self.interrupted.discard(chat_id)
             return None
         if check:
             return self.queues[chat_id][1] if len(self.queues[chat_id]) > 1 else None
 
         self.queues[chat_id].popleft()
+        if not self.queues[chat_id]:
+            self.interrupted.discard(chat_id)
         self.save_live()
         return self.queues[chat_id][0] if self.queues[chat_id] else None
 
@@ -311,12 +324,16 @@ class Queue:
         """Remove the currently playing item only (if exists)."""
         if self.queues[chat_id]:
             self.queues[chat_id].popleft()
+            if not self.queues[chat_id]:
+                self.interrupted.discard(chat_id)
             self.save_live()
 
     def remove_current_if(self, chat_id: int, queue_id: str | None) -> bool:
         """Remove the current item only when it still matches the expected request."""
         if self.queues[chat_id] and self.queues[chat_id][0].queue_id == queue_id:
             self.queues[chat_id].popleft()
+            if not self.queues[chat_id]:
+                self.interrupted.discard(chat_id)
             self.save_live()
             return True
         return False
@@ -324,4 +341,5 @@ class Queue:
     def clear(self, chat_id: int) -> None:
         """Clear the entire queue."""
         self.queues[chat_id].clear()
+        self.interrupted.discard(chat_id)
         self.save_live()

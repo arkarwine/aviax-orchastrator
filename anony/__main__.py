@@ -41,6 +41,7 @@ async def idle():
             loop.add_signal_handler(sig, stop_event.set)
     await stop_event.wait()
 
+
 async def main():
     loop = asyncio.get_running_loop()
     default_exception_handler = loop.get_exception_handler()
@@ -111,9 +112,18 @@ async def main():
     logger.info(f"Loaded {len(app.sudoers)} sudo users.")
     menu_warnings = await sync_command_menus()
     if menu_warnings:
-        logger.warning("Command menus registered with %d warning(s).", len(menu_warnings))
+        logger.warning(
+            "Command menus registered with %d warning(s).", len(menu_warnings)
+        )
 
+    anon.consume_pending_restart_marker()
     health.mark_healthy()
+    tasks.append(
+        asyncio.create_task(
+            anon.interrupted_queue_worker(),
+            name="interrupted-playback-restore",
+        )
+    )
     tasks.append(
         asyncio.create_task(
             anon.maintenance_queue_worker(),

@@ -3,10 +3,10 @@
 # This file is part of AnonXMusic
 
 
-import os
-import sys
-import shutil
 import asyncio
+import os
+import shutil
+import sys
 
 from pyrogram import filters, types
 
@@ -49,14 +49,14 @@ async def _restart(_, m: types.Message):
     sent = await m.reply_text(m.lang["restarting"])
 
     shutil.rmtree("cache", ignore_errors=True)
-    if not os.getenv("DOWNLOADS_PATH"):
-        shutil.rmtree("downloads", ignore_errors=True)
 
     await sent.edit_text(m.lang["restarted"])
     asyncio.create_task(stop())
     await asyncio.sleep(2)
 
-    try: os.remove("log.txt")
-    except Exception: pass
+    try:
+        os.remove("log.txt")
+    except Exception:
+        pass
 
     os.execl(sys.executable, sys.executable, "-m", "anony")

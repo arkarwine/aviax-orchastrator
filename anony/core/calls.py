@@ -42,6 +42,7 @@ class TgCall(PyTgCalls):
         self._operations = {}
         self._last_stream_end = {}
         self._maintenance_restore_attempts = {}
+        self._interrupted_restore_attempts = {}
         self._playback_timeout_count = 0
         self._last_playback_timeout = None
         self._restart_request = None
@@ -681,6 +682,82 @@ class TgCall(PyTgCalls):
                 await app.send_message(user_id, text)
             except Exception:
                 logger.debug("Could not notify maintenance requester user=%s", user_id)
+
+    def consume_pending_restart_marker(self) -> bool:
+        marker = Path.cwd() / ".restart-when-idle"
+        if not marker.exists():
+            return False
+        try:
+            marker.unlink()
+            logger.info("Consumed pending restart marker after deployment boot.")
+            return True
+        except OSError as exc:
+            logger.warning("Could not consume pending restart marker: %s", exc)
+            return False
+
+    async def resume_interrupted_streams(self) -> None:
+        for chat_id in queue.interrupted_chats():
+            if queue.get_deferred(chat_id):
+                continue
+            if await db.get_call(chat_id):
+                queue.clear_interrupted(chat_id)
+                self._interrupted_restore_attempts.pop(chat_id, None)
+                continue
+
+            current = queue.get_current(chat_id)
+            if not current:
+                queue.clear_interrupted(chat_id)
+                self._interrupted_restore_attempts.pop(chat_id, None)
+                continue
+
+            now = time.monotonic()
+            if now - self._interrupted_restore_attempts.get(chat_id, 0) < 20:
+                continue
+            self._interrupted_restore_attempts[chat_id] = now
+
+            if not await self.has_active_group_call(
+                chat_id, assume_active_on_error=False
+            ):
+                continue
+
+            try:
+                if not current.file_path:
+                    current.file_path = await asyncio.wait_for(
+                        yt.download(current.id, video=current.video),
+                        timeout=180,
+                    )
+                if not current.file_path:
+                    raise FileNotFoundError(
+                        f"No file available for interrupted media {current.id}"
+                    )
+
+                msg = await app.send_message(
+                    chat_id,
+                    "🔄 <b>Restoring interrupted stream</b>\n\n"
+                    "▶️ Playback is resuming automatically after the restart...",
+                )
+                current.message_id = msg.id
+                await self.play_media(chat_id, msg, current)
+                if await db.get_call(chat_id):
+                    queue.clear_interrupted(chat_id)
+                    self._interrupted_restore_attempts.pop(chat_id, None)
+                    logger.info("Resumed interrupted playback for chat=%s", chat_id)
+            except PlaybackRecoveryQueued:
+                raise
+            except Exception:
+                logger.exception(
+                    "Could not resume interrupted playback for chat=%s", chat_id
+                )
+
+    async def interrupted_queue_worker(self) -> None:
+        while True:
+            try:
+                await self.resume_interrupted_streams()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Interrupted playback restore worker failed.")
+            await asyncio.sleep(15)
 
     async def maintenance_queue_worker(self) -> None:
         while True:

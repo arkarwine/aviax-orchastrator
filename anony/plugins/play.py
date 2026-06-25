@@ -407,10 +407,14 @@ async def play_hndlr(
             track.queue_id = track.queue_id or uuid4().hex[:10]
 
         if queue.get_queue(m.chat.id) and not await db.get_call(m.chat.id):
-            logger.warning(
-                "Clearing stale playback queue before new start chat=%s", m.chat.id
-            )
-            queue.clear(m.chat.id)
+            if queue.is_interrupted(m.chat.id):
+                anon._interrupted_restore_attempts.pop(m.chat.id, None)
+                await anon.resume_interrupted_streams()
+            elif not queue.get_deferred(m.chat.id):
+                logger.warning(
+                    "Clearing stale playback queue before new start chat=%s", m.chat.id
+                )
+                queue.clear(m.chat.id)
 
         duplicate = queue.duplicate_position(m.chat.id, file.id)
         if duplicate >= 0 and not force:

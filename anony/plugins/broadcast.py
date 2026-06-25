@@ -7,7 +7,7 @@ import asyncio
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from pyrogram import errors, filters, types
@@ -18,6 +18,7 @@ FLOOD_RETRIES = 3
 PROGRESS_INTERVAL = 5
 SEND_DELAY = 0.15
 SCHEDULE_POLL_INTERVAL = 15
+MAX_DAILY_BROADCAST_DAYS = 365
 broadcast_state = None
 runtime_broadcast_task: asyncio.Task | None = None
 runtime_broadcast_stop_event: asyncio.Event | None = None
@@ -310,6 +311,57 @@ def parse_scheduled_broadcast(
     )
 
 
+def parse_broadcast_flags(remainder: str) -> tuple[bool, bool, int | None, str, str | None]:
+    include_users = False
+    exclude_groups = False
+    everyday_days = None
+    remove_spans: list[tuple[int, int]] = []
+
+    for match in re.finditer(r"(?<!\S)-(?:user|nochat)(?!\S)", remainder):
+        flag = match.group(0)
+        include_users = include_users or flag == "-user"
+        exclude_groups = exclude_groups or flag == "-nochat"
+        remove_spans.append(match.span())
+
+    everyday = re.search(r"(?<!\S)--?everyday(?:\s+(\d+))?(?!\S)", remainder, re.I)
+    if everyday:
+        if not everyday.group(1):
+            return False, False, None, "", "Use <code>-everyday &lt;days&gt;</code>, for example <code>-everyday 7</code>."
+        everyday_days = int(everyday.group(1))
+        if everyday_days < 1 or everyday_days > MAX_DAILY_BROADCAST_DAYS:
+            return False, False, None, "", f"Everyday days must be between 1 and {MAX_DAILY_BROADCAST_DAYS}."
+        remove_spans.append(everyday.span())
+
+    text = remainder
+    for start, end in sorted(remove_spans, reverse=True):
+        text = text[:start] + " " + text[end:]
+    return include_users, exclude_groups, everyday_days, re.sub(r"\s+", " ", text).strip(), None
+
+
+def next_daily_broadcast(item: dict) -> dict | None:
+    remaining = int(item.get("everyday_remaining") or 0)
+    if remaining <= 1:
+        return None
+    try:
+        next_run = datetime.fromisoformat(str(item.get("run_at") or "")) + timedelta(days=1)
+    except ValueError:
+        return None
+    remaining -= 1
+    skipped = 0
+    now = datetime.now(timezone.utc)
+    while next_run <= now and remaining > 1:
+        next_run += timedelta(days=1)
+        remaining -= 1
+        skipped += 1
+    updated = dict(item)
+    updated["run_at"] = next_run.isoformat()
+    updated["everyday_remaining"] = remaining
+    updated["last_run_at"] = datetime.now(timezone.utc).isoformat()
+    if skipped:
+        updated["everyday_skipped"] = int(updated.get("everyday_skipped") or 0) + skipped
+    return updated
+
+
 async def dispatch_scheduled_broadcast(item: dict) -> bool:
     requested_by = int(item.get("requested_by") or 0)
     scheduled_id = str(item.get("id") or "unknown")
@@ -342,11 +394,18 @@ async def dispatch_scheduled_broadcast(item: dict) -> bool:
 
     if requested_by:
         try:
+            repeat_line = ""
+            if item.get("everyday_remaining"):
+                repeat_line = (
+                    f"🔁 Daily run: <code>{int(item.get('everyday_total') or 0) - int(item.get('everyday_remaining') or 0) + 1}"
+                    f"/{int(item.get('everyday_total') or item.get('everyday_remaining') or 0)}</code>\n"
+                )
             await app.send_message(
                 requested_by,
                 "📣 <b>Scheduled broadcast started.</b>\n\n"
                 f"🆔 ID: <code>{scheduled_id}</code>\n"
                 f"🕒 Scheduled for: <code>{format_run_at(str(item.get('run_at') or ''))}</code>\n"
+                f"{repeat_line}"
                 f"📬 Recipients: <code>{summary['recipient_count']}</code>",
             )
         except Exception:
@@ -395,9 +454,12 @@ async def scheduled_broadcast_worker() -> None:
 
             started_or_consumed = await dispatch_scheduled_broadcast(due_item)
             if started_or_consumed:
-                await db.save_scheduled_broadcasts(
-                    [item for item in valid if item.get("id") != due_item.get("id")]
-                )
+                next_item = next_daily_broadcast(due_item)
+                updated = [item for item in valid if item.get("id") != due_item.get("id")]
+                if next_item:
+                    updated.append(next_item)
+                    updated.sort(key=lambda entry: str(entry.get("run_at", "")))
+                await db.save_scheduled_broadcasts(updated)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -512,7 +574,7 @@ async def _broadcast(_, message: types.Message):
 
 
 @app.on_message(
-    filters.command(["schedulebroadcast", "schedulecast"])
+    filters.command(["sbroadcast", "schedulebroadcast", "schedulecast"])
     & filters.private
     & app.sudoers
 )
@@ -527,14 +589,20 @@ async def _schedule_broadcast(_, message: types.Message):
     if error:
         return await message.reply_text(
             "🕒 <b>Scheduled broadcast usage</b>\n\n"
-            "<code>/schedulebroadcast in 30m [-user] [-nochat] message</code>\n"
-            "<code>/schedulebroadcast 2026-06-19 21:30 [-user] [-nochat] message</code>\n\n"
+            "<code>/sbroadcast in 30m [-user] [-nochat] message</code>\n"
+            "<code>/sbroadcast 2026-06-19 21:30 [-user] [-nochat] message</code>\n"
+            "<code>/sbroadcast 2026-06-19 21:30 -everyday 7 [-user] message</code>\n\n"
             f"💡 {error}"
         )
 
-    include_users = "-user" in remainder.split()
-    exclude_groups = "-nochat" in remainder.split()
-    text = re.sub(r"(?<!\S)-(?:user|nochat)(?!\S)", "", remainder).strip()
+    include_users, exclude_groups, everyday_days, text, flag_error = parse_broadcast_flags(remainder)
+    if flag_error:
+        return await message.reply_text(
+            "🕒 <b>Scheduled broadcast usage</b>\n\n"
+            "<code>/sbroadcast in 30m -everyday 3 message</code>\n"
+            "<code>/sbroadcast 2026-06-19 21:30 -everyday 7 [-user] [-nochat] message</code>\n\n"
+            f"💡 {flag_error}"
+        )
     if message.reply_to_message:
         text = message.reply_to_message.text or message.reply_to_message.caption or text
     if not text:
@@ -559,14 +627,23 @@ async def _schedule_broadcast(_, message: types.Message):
         "requested_by": message.from_user.id,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if everyday_days:
+        item["everyday_total"] = everyday_days
+        item["everyday_remaining"] = everyday_days
     broadcasts = list(await db.get_scheduled_broadcasts())
     broadcasts.append(item)
     broadcasts.sort(key=lambda entry: str(entry.get("run_at", "")))
     await db.save_scheduled_broadcasts(broadcasts)
+    repeat_text = (
+        f"🔁 Everyday: <code>{everyday_days} day{'s' if everyday_days != 1 else ''}</code>\n"
+        if everyday_days
+        else ""
+    )
     await message.reply_text(
         f"✅ <b>Broadcast scheduled.</b>\n\n"
         f"🆔 ID: <code>{item['id']}</code>\n"
         f"🕒 Runs at: <code>{format_run_at(item['run_at'])}</code>\n"
+        f"{repeat_text}"
         f"👤 Include users: <code>{'yes' if include_users else 'no'}</code>\n"
         f"👥 Include groups: <code>{'no' if exclude_groups else 'yes'}</code>"
     )
@@ -586,9 +663,18 @@ async def _scheduled_broadcasts(_, message: types.Message):
     for item in sorted(broadcasts, key=lambda entry: str(entry.get("run_at", "")))[:20]:
         preview = str(item.get("text") or "")
         preview = preview[:60] + ("…" if len(preview) > 60 else "")
+        repeat_line = ""
+        if item.get("everyday_remaining"):
+            repeat_line = (
+                f"🔁 Daily remaining: <code>{int(item.get('everyday_remaining') or 0)}</code>"
+                f"/<code>{int(item.get('everyday_total') or item.get('everyday_remaining') or 0)}</code>\n"
+            )
+            if item.get("everyday_skipped"):
+                repeat_line += f"⏭️ Missed while offline/busy: <code>{int(item.get('everyday_skipped') or 0)}</code>\n"
         lines.append(
             f"\n🆔 <code>{item.get('id')}</code>\n"
             f"🕒 <code>{format_run_at(str(item.get('run_at') or ''))}</code>\n"
+            f"{repeat_line}"
             f"👤 Include users: <code>{'yes' if item.get('include_users') else 'no'}</code>\n"
             f"👥 Include groups: <code>{'no' if item.get('exclude_groups') else 'yes'}</code>\n"
             f"📣 {preview}"
