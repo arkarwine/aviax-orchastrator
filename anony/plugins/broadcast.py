@@ -111,6 +111,30 @@ async def send_runtime_text(chat_id: int, text: str) -> tuple[bool, str | None]:
     return False, "Delivery retries exhausted."
 
 
+async def send_runtime_source_message(
+    chat_id: int,
+    *,
+    source_chat_id: int,
+    source_message_id: int,
+    copy: bool,
+) -> tuple[bool, str | None]:
+    for attempt in range(FLOOD_RETRIES + 1):
+        try:
+            if copy:
+                await app.copy_message(chat_id, source_chat_id, source_message_id)
+            else:
+                await app.forward_messages(chat_id, source_chat_id, source_message_id)
+            return True, None
+        except (errors.FloodWait, errors.FloodPremiumWait) as flood:
+            if attempt >= FLOOD_RETRIES:
+                return False, f"Flood wait remained after {FLOOD_RETRIES} retries."
+            wait_seconds = max(int(getattr(flood, "value", 1) or 1), 1) + 1
+            await asyncio.sleep(wait_seconds)
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+    return False, "Delivery retries exhausted."
+
+
 async def run_runtime_broadcast(
     *,
     text: str,
@@ -119,6 +143,9 @@ async def run_runtime_broadcast(
     requested_by: int,
     stop_event: asyncio.Event,
     label: str = "broadcast",
+    source_chat_id: int | None = None,
+    source_message_id: int | None = None,
+    copy_source: bool = True,
 ) -> None:
     global runtime_broadcast_task, runtime_broadcast_stop_event
     delivered = failed = groups = users = 0
@@ -128,7 +155,15 @@ async def run_runtime_broadcast(
         for chat_id in recipients:
             if stop_event.is_set():
                 break
-            success, error = await send_runtime_text(chat_id, text)
+            if source_chat_id and source_message_id:
+                success, error = await send_runtime_source_message(
+                    chat_id,
+                    source_chat_id=source_chat_id,
+                    source_message_id=source_message_id,
+                    copy=copy_source,
+                )
+            else:
+                success, error = await send_runtime_text(chat_id, text)
             if success:
                 delivered += 1
                 if chat_id in group_ids:
@@ -181,9 +216,12 @@ async def start_runtime_broadcast(
     exclude_groups: bool,
     requested_by: int,
     label: str = "broadcast",
+    source_chat_id: int | None = None,
+    source_message_id: int | None = None,
+    copy_source: bool = True,
 ) -> dict:
     global runtime_broadcast_task, runtime_broadcast_stop_event
-    if not text or len(text) > 4096:
+    if (not source_chat_id or not source_message_id) and (not text or len(text) > 4096):
         raise ValueError("broadcast text must contain between 1 and 4096 characters")
     if broadcast_state or (
         runtime_broadcast_task and not runtime_broadcast_task.done()
@@ -203,6 +241,9 @@ async def start_runtime_broadcast(
             requested_by=requested_by,
             stop_event=runtime_broadcast_stop_event,
             label=label,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
+            copy_source=copy_source,
         ),
         name=f"{label.replace(' ', '-')}-runtime",
     )
@@ -270,47 +311,6 @@ def format_run_at(value: str) -> str:
         return value
 
 
-def parse_scheduled_broadcast(
-    command_text: str,
-) -> tuple[datetime | None, str, str | None]:
-    command_text = command_text.strip()
-    relative = re.match(r"^in\s+(\d+)\s*([mhd])\b\s*(.*)$", command_text, re.I | re.S)
-    if relative:
-        amount = int(relative.group(1))
-        unit = relative.group(2).lower()
-        seconds = amount * {"m": 60, "h": 3600, "d": 86400}[unit]
-        if seconds < 60:
-            return None, "", "Use at least 1 minute for a scheduled broadcast."
-        return (
-            datetime.fromtimestamp(time.time() + seconds, timezone.utc),
-            relative.group(3),
-            None,
-        )
-
-    absolute = re.match(
-        r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2})(?:\s+|$)(.*)$",
-        command_text,
-        re.S,
-    )
-    if absolute:
-        try:
-            local_time = datetime.strptime(
-                absolute.group(1).replace("T", " "), "%Y-%m-%d %H:%M"
-            ).astimezone()
-        except ValueError:
-            return None, "", "Use time as <code>YYYY-MM-DD HH:MM</code>."
-        return local_time.astimezone(timezone.utc), absolute.group(2), None
-
-    return (
-        None,
-        "",
-        (
-            "Use <code>in 30m</code>, <code>in 2h</code>, or "
-            "<code>YYYY-MM-DD HH:MM</code> before the message."
-        ),
-    )
-
-
 def parse_broadcast_flags(remainder: str) -> tuple[bool, bool, int | None, str, str | None]:
     include_users = False
     exclude_groups = False
@@ -372,6 +372,9 @@ async def dispatch_scheduled_broadcast(item: dict) -> bool:
             exclude_groups=bool(item.get("exclude_groups")),
             requested_by=requested_by,
             label="scheduled broadcast",
+            source_chat_id=int(item.get("source_chat_id") or 0) or None,
+            source_message_id=int(item.get("source_message_id") or 0) or None,
+            copy_source=bool(item.get("copy", True)),
         )
     except RuntimeError:
         return False
@@ -475,7 +478,18 @@ async def _broadcast(_, message: types.Message):
         return await message.reply_text(
             "📣 Reply to the message you want to broadcast.\n\n"
             "💡 Add <code>-user</code> to include users, <code>-nochat</code> to exclude groups, "
-            "or <code>-copy</code> to remove the forwarded label."
+            "<code>-copy</code> to remove the forwarded label, or "
+            "<code>-everyday 7</code> to repeat it daily for 7 total runs."
+        )
+    command_text = (message.text or "").split(maxsplit=1)
+    include_users, exclude_groups, everyday_days, _unused_text, flag_error = parse_broadcast_flags(
+        command_text[1] if len(command_text) > 1 else ""
+    )
+    if flag_error:
+        return await message.reply_text(
+            "📣 <b>Broadcast usage</b>\n\n"
+            "<code>/broadcast [-user] [-nochat] [-copy] [-everyday 7]</code>\n\n"
+            f"💡 {flag_error}"
         )
     if broadcast_state or (
         runtime_broadcast_task and not runtime_broadcast_task.done()
@@ -492,8 +506,8 @@ async def _broadcast(_, message: types.Message):
     command_parts = list(message.command or [])
     status = await message.reply_text("🔎 Collecting broadcast recipients...")
     recipients, _, group_ids = await collect_recipients(
-        include_users="-user" in command_parts,
-        exclude_groups="-nochat" in command_parts,
+        include_users=include_users,
+        exclude_groups=exclude_groups,
     )
     if not recipients:
         return await status.edit_text(
@@ -517,6 +531,31 @@ async def _broadcast(_, message: types.Message):
     broadcast_state = state
     await update_progress(state, force=True)
     await log_broadcast_start(message, message.reply_to_message)
+    if everyday_days and everyday_days > 1:
+        item = {
+            "id": uuid.uuid4().hex[:8],
+            "run_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "text": message.reply_to_message.text or message.reply_to_message.caption or "",
+            "source_chat_id": message.reply_to_message.chat.id,
+            "source_message_id": message.reply_to_message.id,
+            "copy": "-copy" in command_parts,
+            "include_users": include_users,
+            "exclude_groups": exclude_groups,
+            "requested_by": message.from_user.id if message.from_user else 0,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "everyday_total": everyday_days,
+            "everyday_remaining": everyday_days - 1,
+        }
+        broadcasts = list(await db.get_scheduled_broadcasts())
+        broadcasts.append(item)
+        broadcasts.sort(key=lambda entry: str(entry.get("run_at", "")))
+        await db.save_scheduled_broadcasts(broadcasts)
+        await status.reply_text(
+            f"🔁 <b>Daily repeat saved.</b>\n\n"
+            f"🆔 ID: <code>{item['id']}</code>\n"
+            f"📆 Remaining future runs: <code>{item['everyday_remaining']}</code>\n"
+            f"🕒 Next run: <code>{format_run_at(item['run_at'])}</code>"
+        )
 
     try:
         for chat_id in recipients:
@@ -574,82 +613,6 @@ async def _broadcast(_, message: types.Message):
 
 
 @app.on_message(
-    filters.command(["sbroadcast", "schedulebroadcast", "schedulecast"])
-    & filters.private
-    & app.sudoers
-)
-@lang.language()
-async def _schedule_broadcast(_, message: types.Message):
-    if not message.from_user:
-        return
-    parts = (message.text or "").split(maxsplit=1)
-    run_at, remainder, error = parse_scheduled_broadcast(
-        parts[1] if len(parts) > 1 else ""
-    )
-    if error:
-        return await message.reply_text(
-            "🕒 <b>Scheduled broadcast usage</b>\n\n"
-            "<code>/sbroadcast in 30m [-user] [-nochat] message</code>\n"
-            "<code>/sbroadcast 2026-06-19 21:30 [-user] [-nochat] message</code>\n"
-            "<code>/sbroadcast 2026-06-19 21:30 -everyday 7 [-user] message</code>\n\n"
-            f"💡 {error}"
-        )
-
-    include_users, exclude_groups, everyday_days, text, flag_error = parse_broadcast_flags(remainder)
-    if flag_error:
-        return await message.reply_text(
-            "🕒 <b>Scheduled broadcast usage</b>\n\n"
-            "<code>/sbroadcast in 30m -everyday 3 message</code>\n"
-            "<code>/sbroadcast 2026-06-19 21:30 -everyday 7 [-user] [-nochat] message</code>\n\n"
-            f"💡 {flag_error}"
-        )
-    if message.reply_to_message:
-        text = message.reply_to_message.text or message.reply_to_message.caption or text
-    if not text:
-        return await message.reply_text(
-            "📣 <b>Broadcast text is required.</b>\n\n"
-            "Reply to a text message or include text after the scheduled time."
-        )
-    if len(text) > 4096:
-        return await message.reply_text(
-            "❌ <b>The broadcast is too long.</b>\n\n"
-            "💡 Keep the message within Telegram's 4096-character text limit."
-        )
-    if not run_at or run_at <= datetime.now(timezone.utc):
-        return await message.reply_text("❌ <b>The scheduled time is already past.</b>")
-
-    item = {
-        "id": uuid.uuid4().hex[:8],
-        "run_at": run_at.isoformat(),
-        "text": text,
-        "include_users": include_users,
-        "exclude_groups": exclude_groups,
-        "requested_by": message.from_user.id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    if everyday_days:
-        item["everyday_total"] = everyday_days
-        item["everyday_remaining"] = everyday_days
-    broadcasts = list(await db.get_scheduled_broadcasts())
-    broadcasts.append(item)
-    broadcasts.sort(key=lambda entry: str(entry.get("run_at", "")))
-    await db.save_scheduled_broadcasts(broadcasts)
-    repeat_text = (
-        f"🔁 Everyday: <code>{everyday_days} day{'s' if everyday_days != 1 else ''}</code>\n"
-        if everyday_days
-        else ""
-    )
-    await message.reply_text(
-        f"✅ <b>Broadcast scheduled.</b>\n\n"
-        f"🆔 ID: <code>{item['id']}</code>\n"
-        f"🕒 Runs at: <code>{format_run_at(item['run_at'])}</code>\n"
-        f"{repeat_text}"
-        f"👤 Include users: <code>{'yes' if include_users else 'no'}</code>\n"
-        f"👥 Include groups: <code>{'no' if exclude_groups else 'yes'}</code>"
-    )
-
-
-@app.on_message(
     filters.command(["scheduledbroadcasts", "broadcasts"])
     & filters.private
     & app.sudoers
@@ -662,6 +625,8 @@ async def _scheduled_broadcasts(_, message: types.Message):
     lines = ["<b>📆 Scheduled Broadcasts</b>"]
     for item in sorted(broadcasts, key=lambda entry: str(entry.get("run_at", "")))[:20]:
         preview = str(item.get("text") or "")
+        if not preview and item.get("source_message_id"):
+            preview = f"replied message #{item.get('source_message_id')}"
         preview = preview[:60] + ("…" if len(preview) > 60 else "")
         repeat_line = ""
         if item.get("everyday_remaining"):

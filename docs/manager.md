@@ -60,7 +60,7 @@ The ecosystem file sets `treekill: false`. This is required because PM2 otherwis
 
 Manager-authorized users can manage each deployed bot's sudo list directly with `/addbotsudo`, `/delbotsudo`, and `/botsudolist`.
 
-Scheduled broadcasts now live inside each deployed bot instead of the manager. Use the deployed bot's private `/schedulebroadcast`, `/scheduledbroadcasts`, and `/cancelbroadcast` commands.
+Daily broadcasts now live inside each deployed bot instead of the manager. Reply to a message with `/broadcast -everyday <days>` to send it now and repeat it daily. Use `/scheduledbroadcasts` and `/cancelbroadcast` to view or cancel future repeats.
 
 After `/addbotsudo` or `/delbotsudo`, the manager automatically asks a healthy running
 deployment to reload its sudo access and command menus. If the deployment is stopped,

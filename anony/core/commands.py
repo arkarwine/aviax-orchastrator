@@ -108,7 +108,6 @@ REMOTE_MODERATION_COMMANDS = [
 BASE_SUDO_PRIVATE_COMMANDS = PUBLIC_PRIVATE_COMMANDS + [
     ("activevc", "View active voice chats"),
     ("broadcast", "Broadcast a replied message"),
-    ("sbroadcast", "Schedule one-time or daily text broadcasts"),
     ("scheduledbroadcasts", "View scheduled broadcasts"),
     ("cancelbroadcast", "Cancel a scheduled broadcast"),
     ("stop_broadcast", "Cancel the active broadcast"),
