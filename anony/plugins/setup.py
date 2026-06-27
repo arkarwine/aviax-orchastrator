@@ -462,6 +462,9 @@ async def _view_sessions(_, m: types.Message):
             username = getattr(client, "username", None)
             identity = f"@{escape(username)}" if username else name
             lines.append(f"🟢 Slot {slot}: {identity} — connected")
+        elif slot in getattr(userbot, "failed_slots", {}):
+            reason = escape(userbot.failed_slots.get(slot) or "startup failed")
+            lines.append(f"🔴 Slot {slot}: configured — failed to start ({reason})")
         else:
             lines.append(f"🟡 Slot {slot}: configured — offline/restart required")
 

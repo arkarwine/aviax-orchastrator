@@ -5,7 +5,7 @@
 
 from pathlib import Path
 
-from pyrogram import Client
+from pyrogram import Client, errors
 
 from anony import config, logger
 
@@ -19,6 +19,7 @@ class Userbot(Client):
         Each client is assigned a unique name based on the key in the `clients` dictionary.
         """
         self.clients = []
+        self.failed_slots: dict[int, str] = {}
         self.reload_from_config()
 
     def available_slots(self) -> list[int]:
@@ -49,6 +50,7 @@ class Userbot(Client):
                 key,
                 self.build_client(session_name, session),
             )
+        self.failed_slots.clear()
 
     def build_client(self, session_name: str, session: str | None = None) -> Client:
         return Client(
@@ -66,7 +68,25 @@ class Userbot(Client):
             3: self.three,
         }
         client = clients[num]
-        await client.start()
+        try:
+            await client.start()
+        except errors.Unauthorized as exc:
+            reason = type(exc).__name__
+            self.failed_slots[num] = reason
+            logger.warning(
+                "Assistant session slot %s is unauthorized and was skipped: %s",
+                num,
+                exc,
+            )
+            return False
+        except Exception as exc:
+            reason = type(exc).__name__
+            self.failed_slots[num] = reason
+            logger.exception(
+                "Assistant session slot %s could not start and was skipped.", num
+            )
+            return False
+
         if config.LOGGER_ID:
             try:
                 await client.send_message(config.LOGGER_ID, "Assistant Started")
@@ -84,8 +104,10 @@ class Userbot(Client):
         client.mention = ub.me.mention
         client.session_slot = num
         self.clients.append(client)
+        self.failed_slots.pop(num, None)
 
         logger.info(f"Assistant {num} started as @{client.username}")
+        return True
 
     async def add_session(self, session: str) -> int:
         for num, attr in enumerate(("one", "two", "three"), start=1):
